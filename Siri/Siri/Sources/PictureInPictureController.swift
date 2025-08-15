@@ -229,7 +229,6 @@ public class PictureInPictureManager: NSObject, ObservableObject {
             Task { @MainActor in
                 self?.player?.seek(to: .zero)
                 self?.player?.play()
-                print("🔄 [PiP] 视频循环播放")
             }
         }
         
