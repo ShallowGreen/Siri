@@ -14,6 +14,12 @@ let project = Project(
                         "UIColorName": "",
                         "UIImageName": "",
                     ],
+                    "NSMicrophoneUsageDescription": "This app requires microphone access to record and transcribe speech.",
+                    "NSSpeechRecognitionUsageDescription": "This app requires speech recognition to convert audio to text.",
+                    "UIBackgroundModes": ["audio", "background-processing"],
+                    "UIRequiredDeviceCapabilities": ["microphone"],
+                    "AVInitialRouteSharingPolicy": "LongFormAudio",
+                    "UISupportsDocumentBrowser": false,
                 ]
             ),
             sources: ["Siri/Sources/**"],
