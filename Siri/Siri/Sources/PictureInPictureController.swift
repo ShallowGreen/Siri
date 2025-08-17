@@ -45,20 +45,35 @@ public class PictureInPictureTextView: UIView {
         addSubview(backgroundView)
         backgroundView.addSubview(textLabel)
         
+        // 创建约束并设置优先级以避免冲突
+        let centerXConstraint = backgroundView.centerXAnchor.constraint(equalTo: centerXAnchor)
+        let centerYConstraint = backgroundView.centerYAnchor.constraint(equalTo: centerYAnchor)
+        centerYConstraint.priority = UILayoutPriority(999) // 略低于required
+        
+        let leadingConstraint = backgroundView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 8)
+        let trailingConstraint = backgroundView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8)
+        let topConstraint = backgroundView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 4)
+        let bottomConstraint = backgroundView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -4)
+        
+        // 设置边距约束为低优先级，允许在小窗口中被打破
+        topConstraint.priority = UILayoutPriority(900)
+        bottomConstraint.priority = UILayoutPriority(900)
+        leadingConstraint.priority = UILayoutPriority(900)
+        trailingConstraint.priority = UILayoutPriority(900)
+        
         NSLayoutConstraint.activate([
-            // Background view constraints
-            backgroundView.centerXAnchor.constraint(equalTo: centerXAnchor),
-            backgroundView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            backgroundView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
-            backgroundView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
-            backgroundView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 20),
-            backgroundView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -20),
+            centerXConstraint,
+            centerYConstraint,
+            leadingConstraint,
+            trailingConstraint,
+            topConstraint,
+            bottomConstraint,
             
-            // Text label constraints
-            textLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 16),
-            textLabel.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -16),
-            textLabel.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 12),
-            textLabel.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -12)
+            // Text label constraints - 使用更小的边距
+            textLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 8),
+            textLabel.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -8),
+            textLabel.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 4),
+            textLabel.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -4)
         ])
     }
     
@@ -105,6 +120,15 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     
     public func startPictureInPicture() {
         print("🎬 [PiP] 开始启动画中画...")
+        
+        // 🔑 关键修复：在启动画中画之前确保通知监听已设置
+        if pipWindow == nil {
+            print("📡 [PiP] pipWindow为空，重新设置窗口监听以捕获新窗口...")
+            print("   - 当前疑似窗口数量: \(suspectedWindows.count)")
+            // 注意：不清空疑似窗口，保留已收集的窗口
+            // 重新设置通知监听以捕获可能的新窗口
+            setupNotifications()
+        }
         
         guard AVPictureInPictureController.isPictureInPictureSupported() else {
             print("❌ [PiP] 设备不支持画中画功能")
@@ -267,25 +291,41 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     }
     
     private func setupNotifications() {
-        // 监听窗口显示通知
+        print("📡 [PiP] 设置窗口显示通知监听...")
+        
+        // 先移除旧的监听器，避免重复添加
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UIWindow.didBecomeVisibleNotification,
+            object: nil
+        )
+        
+        // 重新添加监听窗口显示通知
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(windowDidBecomeVisible(_:)),
             name: UIWindow.didBecomeVisibleNotification,
             object: nil
         )
+        print("✅ [PiP] 窗口显示通知监听设置完成")
     }
     
     @objc private func windowDidBecomeVisible(_ notification: Notification) {
         guard let window = notification.object as? UIWindow else { return }
         
-        print("🪟 [PiP] 检测到窗口显示: \(type(of: window))")
+        let windowType = NSStringFromClass(type(of: window))
+        print("🪟 [PiP] 检测到窗口显示:")
+        print("   - 窗口类型: \(windowType)")
+        print("   - 窗口大小: \(window.frame)")
+        print("   - 窗口级别: \(window.windowLevel.rawValue)")
+        print("   - 当前疑似窗口数量: \(suspectedWindows.count)")
         
         // 检查是否是画中画窗口
-        if NSStringFromClass(type(of: window)).contains("PGHostedWindow") {
+        if windowType.contains("PGHostedWindow") {
             print("✅ [PiP] 找到PGHostedWindow")
             pipWindow = window
             setupTextOverlay()
+            print("🚫 [PiP] 移除窗口显示通知监听器")
             NotificationCenter.default.removeObserver(
                 self,
                 name: UIWindow.didBecomeVisibleNotification,
@@ -294,32 +334,132 @@ public class PictureInPictureManager: NSObject, ObservableObject {
         } else {
             // 加入疑似窗口列表
             suspectedWindows.append(window)
+            print("📝 [PiP] 添加疑似窗口: \(windowType)")
+            
+            // 🔑 关键修复：如果画中画已激活但还没找到PGHostedWindow，尝试立即过滤
+            if isPipActive && pipWindow == nil {
+                print("🔍 [PiP] 画中画已激活但未找到窗口，尝试从疑似窗口中查找...")
+                if let foundWindow = filterTargetWindow() {
+                    print("✅ [PiP] 从疑似窗口中找到目标窗口")
+                    pipWindow = foundWindow
+                    setupTextOverlay()
+                    print("🚫 [PiP] 移除窗口显示通知监听器")
+                    NotificationCenter.default.removeObserver(
+                        self,
+                        name: UIWindow.didBecomeVisibleNotification,
+                        object: nil
+                    )
+                }
+            }
         }
     }
     
     private func filterTargetWindow() -> UIWindow? {
-        // 优先查找PGHostedWindow
-        for window in suspectedWindows {
-            if NSStringFromClass(type(of: window)).contains("PGHostedWindow") {
+        print("🔍 [PiP] 开始过滤目标窗口...")
+        
+        // 🔑 新策略：同时检查系统中所有窗口
+        let allWindows = UIApplication.shared.windows
+        print("   - 系统中所有窗口总数: \(allWindows.count)")
+        print("   - 疑似窗口总数: \(suspectedWindows.count)")
+        
+        // 打印系统中所有窗口
+        for (index, window) in allWindows.enumerated() {
+            let windowType = NSStringFromClass(type(of: window))
+            print("   - 系统窗口[\(index)]: \(windowType)")
+            print("     大小: \(window.frame)")
+            print("     级别: \(window.windowLevel.rawValue)")
+            print("     可见: \(window.isHidden ? "否" : "是")")
+        }
+        
+        // 打印疑似窗口的详细信息
+        for (index, window) in suspectedWindows.enumerated() {
+            let windowType = NSStringFromClass(type(of: window))
+            print("   - 疑似窗口[\(index)]: \(windowType)")
+            print("     大小: \(window.frame)")
+            print("     级别: \(window.windowLevel.rawValue)")
+        }
+        
+        // 🔑 首先从系统所有窗口中查找画中画窗口
+        for (index, window) in allWindows.enumerated() {
+            let windowType = NSStringFromClass(type(of: window))
+            // 扩展画中画窗口类型检测
+            if windowType.contains("PGHostedWindow") || 
+               windowType.contains("PictureInPicture") ||
+               windowType.contains("AVPictureInPicture") ||
+               windowType.contains("PiP") {
+                print("✅ [PiP] 在系统窗口[\(index)]中找到画中画窗口: \(windowType)")
                 return window
             }
         }
         
-        // 查找特殊的窗口级别
-        for window in suspectedWindows {
+        // 然后从疑似窗口中查找
+        for (index, window) in suspectedWindows.enumerated() {
+            let windowType = NSStringFromClass(type(of: window))
+            if windowType.contains("PGHostedWindow") || 
+               windowType.contains("PictureInPicture") ||
+               windowType.contains("AVPictureInPicture") ||
+               windowType.contains("PiP") {
+                print("✅ [PiP] 在疑似窗口[\(index)]中找到画中画窗口: \(windowType)")
+                return window
+            }
+        }
+        print("❌ [PiP] 未找到画中画相关窗口")
+        
+        // 查找特殊的窗口级别 - 从系统窗口
+        for (index, window) in allWindows.enumerated() {
             if window.windowLevel.rawValue == -10000000 {
+                print("✅ [PiP] 在系统窗口[\(index)]中找到特殊级别窗口")
                 return window
             }
         }
+        // 查找特殊的窗口级别 - 从疑似窗口
+        for (index, window) in suspectedWindows.enumerated() {
+            if window.windowLevel.rawValue == -10000000 {
+                print("✅ [PiP] 在疑似窗口[\(index)]中找到特殊级别窗口")
+                return window
+            }
+        }
+        print("❌ [PiP] 未找到特殊级别窗口")
         
-        // 根据高度过滤（基于视频高度约400）
+        // 根据高度过滤 - 从系统窗口
+        for (index, window) in allWindows.enumerated() {
+            let height = window.frame.size.height
+            let windowType = NSStringFromClass(type(of: window))
+            // 跳过主应用窗口
+            if windowType.contains("UITextEffectsWindow") && height > 500 {
+                continue
+            }
+            // 接受小高度窗口(< 300) 或 零大小窗口(可能是初始状态)
+            if height < 300 || (height == 0 && window.frame.size.width == 0) {
+                print("✅ [PiP] 在系统窗口[\(index)]中找到目标窗口: \(window.frame.size)")
+                return window
+            }
+        }
+        // 根据高度过滤 - 从疑似窗口
+        for (index, window) in suspectedWindows.enumerated() {
+            let height = window.frame.size.height
+            // 接受小高度窗口(< 300) 或 零大小窗口(可能是初始状态)
+            if height < 300 || (height == 0 && window.frame.size.width == 0) {
+                print("✅ [PiP] 在疑似窗口[\(index)]中找到目标窗口: \(window.frame.size)")
+                return window
+            }
+        }
+        print("❌ [PiP] 未找到符合条件的窗口")
+        
+        // 🚫 不要使用主应用窗口作为fallback！
+        // UITextEffectsWindow 通常是主应用窗口，不是画中画窗口
         for window in suspectedWindows {
-            if window.frame.size.height < 300 {
-                return window
+            let windowType = NSStringFromClass(type(of: window))
+            if windowType.contains("UITextEffectsWindow") && window.frame.height > 500 {
+                print("🚫 [PiP] 跳过主应用窗口: \(windowType) - \(window.frame)")
+                continue
             }
         }
         
-        return suspectedWindows.first
+        print("❌ [PiP] 没有找到合适的画中画窗口")
+        print("💡 [PiP] 提示：真正的画中画窗口可能还未创建，或者需要等待更多窗口事件")
+        
+        return nil
     }
     
     private func setupTextOverlay() {
@@ -378,11 +518,32 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
         Task { @MainActor in
             // 如果还没有找到窗口，尝试过滤
             if pipWindow == nil {
+                print("🔍 [PiP] pipWindow为空，开始寻找目标窗口...")
                 pipWindow = filterTargetWindow()
-                suspectedWindows.removeAll()
-                if pipWindow != nil {
+                
+                if let foundWindow = pipWindow {
+                    print("✅ [PiP] 找到目标窗口，开始设置文字覆盖层")
                     setupTextOverlay()
+                    suspectedWindows.removeAll()
+                } else {
+                    print("❌ [PiP] 未找到目标窗口，启动延迟重试机制...")
+                    // 延迟重试，真正的画中画窗口可能稍后创建
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        print("🔄 [PiP] 延迟重试寻找画中画窗口...")
+                        if self.pipWindow == nil && self.isPipActive {
+                            self.pipWindow = self.filterTargetWindow()
+                            if let retryFoundWindow = self.pipWindow {
+                                print("✅ [PiP] 延迟重试成功找到窗口")
+                                self.setupTextOverlay()
+                                self.suspectedWindows.removeAll()
+                            } else {
+                                print("❌ [PiP] 延迟重试仍未找到窗口")
+                            }
+                        }
+                    }
                 }
+            } else {
+                print("✅ [PiP] pipWindow已存在，直接使用")
             }
         }
     }
@@ -398,10 +559,23 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
     nonisolated public func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         print("🛑 [PiP] 委托: 画中画已停止")
         Task { @MainActor in
+            print("🧹 [PiP] 清理资源...")
+            print("   - 移除pipTextView: \(pipTextView != nil ? "是" : "否")")
+            print("   - 清空pipWindow: \(pipWindow != nil ? "是" : "否")")
+            print("   - 保留疑似窗口列表，当前数量: \(suspectedWindows.count)")
+            
             pipTextView?.removeFromSuperview()
             pipTextView = nil
             pipWindow = nil
-            suspectedWindows.removeAll()
+            
+            // 🔑 关键修复：不清空疑似窗口列表！
+            // suspectedWindows.removeAll() // 注释掉这行
+            // 保留疑似窗口，下次启动时可能还能用到
+            
+            // 注意：不需要在这里重新设置通知监听
+            // 会在下次 startPictureInPicture() 调用时按需设置
+            
+            print("✅ [PiP] 资源清理完成")
         }
     }
     
