@@ -37,6 +37,33 @@ public struct ContentView: View {
     public init() {}
 
     public var body: some View {
+        TabView {
+            // 语音识别 Tab
+            speechRecognitionTab
+                .tabItem {
+                    Image(systemName: "mic")
+                    Text("语音识别")
+                }
+            
+            // 屏幕直播 Tab
+            ScreenBroadcastView()
+                .tabItem {
+                    Image(systemName: "tv")
+                    Text("屏幕直播")
+                }
+        }
+        .onAppear {
+            speechManager.requestAuthorization()
+        }
+        .alert("错误", isPresented: $showingAlert) {
+            Button("确定") { }
+        } message: {
+            Text(alertMessage)
+        }
+    }
+    
+    // MARK: - Speech Recognition Tab
+    private var speechRecognitionTab: some View {
         VStack(spacing: 30) {
             // Title
             Text("Siri")
@@ -160,9 +187,6 @@ public struct ContentView: View {
         }
         .padding(.horizontal, 20)
         .background(Color(.systemGroupedBackground))
-        .onAppear {
-            speechManager.requestAuthorization()
-        }
         .onReceive(speechManager.$recognizedText) { text in
             // Update PiP with recognized text
             pipManager.updateText(text)
@@ -178,15 +202,6 @@ public struct ContentView: View {
                 alertMessage = error
                 showingAlert = true
             }
-        }
-        .onReceive(speechManager.$recognizedText) { newText in
-            // Update PiP text whenever speech recognition text changes
-            pipManager.updateText(newText)
-        }
-        .alert("错误", isPresented: $showingAlert) {
-            Button("确定") { }
-        } message: {
-            Text(alertMessage)
         }
     }
 }
