@@ -1,6 +1,7 @@
 import ReplayKit
 import Foundation
 import CoreMedia
+import AVFoundation
 import os.log
 
 @objc(ScreenBroadcastHandler)
@@ -12,6 +13,12 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     // 状态管理
     private var isRecording = false
     private var audioFrameCount: Int64 = 0
+    
+    // 音频录制
+    private var audioWriter: AVAssetWriter?
+    private var audioWriterInput: AVAssetWriterInput?
+    private var currentAudioFileURL: URL?
+    private var startTime: CMTime?
     
     // MARK: - Broadcast Lifecycle
     
@@ -27,6 +34,10 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         // 设置录制状态
         isRecording = true
         audioFrameCount = 0
+        startTime = nil
+        
+        // 开始音频录制
+        startAudioRecording()
         
         // 通知主程序直播已开始
         updateStatus(status: "started", message: "屏幕直播已开始")
@@ -39,6 +50,9 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         
         isRecording = false
         
+        // 停止音频录制
+        stopAudioRecording()
+        
         // 通知主程序直播已结束
         updateStatus(status: "finished", message: "屏幕直播已结束")
         
@@ -49,6 +63,9 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         logger.error("❌ 屏幕直播发生错误: \(error.localizedDescription)")
         
         isRecording = false
+        
+        // 停止音频录制
+        stopAudioRecording()
         
         // 通知主程序直播发生错误
         updateStatus(status: "error", message: "直播错误: \(error.localizedDescription)")
@@ -83,6 +100,9 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     
     private func processAppAudio(_ sampleBuffer: CMSampleBuffer) {
         audioFrameCount += 1
+        
+        // 保存音频数据到文件
+        saveAudioToFile(sampleBuffer)
         
         // 计算音频电平
         let audioLevel = calculateAudioLevel(sampleBuffer: sampleBuffer)
@@ -202,5 +222,122 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
             // 停止直播
             finishBroadcastWithError(NSError(domain: "UserRequested", code: 0, userInfo: [NSLocalizedDescriptionKey: "用户通过主程序停止直播"]))
         }
+    }
+    
+    // MARK: - Audio Recording Methods
+    
+    private func startAudioRecording() {
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            logger.error("❌ 无法获取App Group容器路径")
+            return
+        }
+        
+        // 创建音频目录
+        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
+        if !FileManager.default.fileExists(atPath: audioDirectory.path) {
+            do {
+                try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                logger.error("❌ 创建音频目录失败: \(error.localizedDescription)")
+                return
+            }
+        }
+        
+        // 创建音频文件
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
+        let fileName = "SystemAudio_\(timestamp).m4a"
+        currentAudioFileURL = audioDirectory.appendingPathComponent(fileName)
+        
+        guard let audioFileURL = currentAudioFileURL else { return }
+        
+        // 设置音频写入器
+        do {
+            audioWriter = try AVAssetWriter(outputURL: audioFileURL, fileType: .m4a)
+            
+            // 配置音频设置
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100.0,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128000
+            ]
+            
+            audioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            audioWriterInput?.expectsMediaDataInRealTime = true
+            
+            if let input = audioWriterInput {
+                audioWriter?.add(input)
+                audioWriter?.startWriting()
+            }
+            
+            logger.info("🎙️ 开始录制音频: \(fileName)")
+            
+            // 通知主程序新文件已创建
+            notifyAudioFileCreated(fileName: fileName, fileURL: audioFileURL)
+            
+        } catch {
+            logger.error("❌ 创建音频写入器失败: \(error.localizedDescription)")
+        }
+    }
+    
+    private func stopAudioRecording() {
+        guard let writer = audioWriter else { return }
+        
+        audioWriterInput?.markAsFinished()
+        
+        writer.finishWriting { [weak self] in
+            if writer.status == .completed {
+                self?.logger.info("✅ 音频文件录制完成")
+                if let url = self?.currentAudioFileURL {
+                    self?.notifyAudioFileCompleted(fileURL: url)
+                }
+            } else if let error = writer.error {
+                self?.logger.error("❌ 音频文件写入失败: \(error.localizedDescription)")
+            }
+        }
+        
+        audioWriter = nil
+        audioWriterInput = nil
+        currentAudioFileURL = nil
+    }
+    
+    private func saveAudioToFile(_ sampleBuffer: CMSampleBuffer) {
+        guard let writer = audioWriter,
+              let input = audioWriterInput,
+              writer.status == .writing,
+              input.isReadyForMoreMediaData else {
+            return
+        }
+        
+        // 设置开始时间
+        if startTime == nil {
+            startTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: startTime!)
+        }
+        
+        // 写入音频数据
+        input.append(sampleBuffer)
+    }
+    
+    private func notifyAudioFileCreated(fileName: String, fileURL: URL) {
+        let notification: [String: Any] = [
+            "event": "audio_file_created",
+            "fileName": fileName,
+            "filePath": fileURL.path,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+        
+        writeToAppGroup(fileName: "audio_notification.json", data: notification)
+    }
+    
+    private func notifyAudioFileCompleted(fileURL: URL) {
+        let notification: [String: Any] = [
+            "event": "audio_file_completed",
+            "fileName": fileURL.lastPathComponent,
+            "filePath": fileURL.path,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+        
+        writeToAppGroup(fileName: "audio_notification.json", data: notification)
     }
 }

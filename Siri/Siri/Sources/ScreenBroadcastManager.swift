@@ -2,6 +2,7 @@ import Foundation
 import ReplayKit
 import Combine
 import UIKit
+import AVFoundation
 import os.log
 
 public class ScreenBroadcastManager: ObservableObject {
@@ -12,17 +13,23 @@ public class ScreenBroadcastManager: ObservableObject {
     @Published public var audioLevel: Double = 0.0
     @Published public var audioFrameCount: Int64 = 0
     @Published public var errorMessage: String? = nil
+    @Published public var audioRecordings: [AudioRecording] = []
+    @Published public var currentRecordingFileName: String? = nil
     
     // MARK: - Private Properties
     private let appGroupID = "group.dev.tuist.Siri"
     private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
     private var statusCheckTimer: Timer?
+    private let audioFileManager = AudioFileManager()
+    private var audioPlayer: AVAudioPlayer?
     
     // MARK: - Initialization
     
     public init() {
         logger.info("📱 ScreenBroadcastManager 初始化")
         clearPreviousData()
+        loadAudioRecordings()
+        setupAudioSession()
     }
     
     deinit {
@@ -144,6 +151,11 @@ public class ScreenBroadcastManager: ObservableObject {
             processBroadcastStatus(statusData)
         }
         
+        // 检查音频通知
+        if let notificationData = readFromAppGroup(fileName: "audio_notification.json") {
+            processAudioNotification(notificationData)
+        }
+        
         // 只有在录制状态下才检查音频数据
         if isRecording {
             if let audioData = readFromAppGroup(fileName: "audio_data.json") {
@@ -262,5 +274,75 @@ public class ScreenBroadcastManager: ObservableObject {
         }
         
         logger.info("🧹 已清除之前的数据")
+    }
+    
+    // MARK: - Audio Management
+    
+    private func setupAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true)
+            logger.info("🎵 音频会话设置成功")
+        } catch {
+            logger.error("❌ 音频会话设置失败: \(error.localizedDescription)")
+        }
+    }
+    
+    public func loadAudioRecordings() {
+        audioRecordings = audioFileManager.getAllRecordings()
+        logger.info("📂 加载了 \(self.audioRecordings.count) 个音频文件")
+    }
+    
+    public func playAudio(at url: URL) {
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.play()
+            logger.info("▶️ 开始播放音频: \(url.lastPathComponent)")
+        } catch {
+            logger.error("❌ 播放音频失败: \(error.localizedDescription)")
+            errorMessage = "播放失败: \(error.localizedDescription)"
+        }
+    }
+    
+    public func stopAudioPlayback() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        logger.info("⏹️ 停止音频播放")
+    }
+    
+    public func deleteRecording(_ recording: AudioRecording) {
+        if audioFileManager.deleteRecording(at: recording.fileURL) {
+            loadAudioRecordings()
+        }
+    }
+    
+    public func shareRecording(_ recording: AudioRecording) -> URL {
+        return recording.fileURL
+    }
+    
+    private func processAudioNotification(_ data: [String: Any]) {
+        guard let event = data["event"] as? String else { return }
+        
+        switch event {
+        case "audio_file_created":
+            if let fileName = data["fileName"] as? String {
+                DispatchQueue.main.async {
+                    self.currentRecordingFileName = fileName
+                    self.logger.info("🎙️ 新音频文件创建: \(fileName)")
+                }
+            }
+            
+        case "audio_file_completed":
+            DispatchQueue.main.async {
+                self.currentRecordingFileName = nil
+                self.loadAudioRecordings()
+                self.logger.info("✅ 音频文件完成")
+            }
+            
+        default:
+            break
+        }
     }
 }

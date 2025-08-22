@@ -4,6 +4,10 @@ public struct ScreenBroadcastView: View {
     @StateObject private var broadcastManager = ScreenBroadcastManager()
     @State private var showingAlert = false
     @State private var alertMessage = ""
+    @State private var selectedRecording: AudioRecording?
+    @State private var showingPlayer = false
+    @State private var showingShareSheet = false
+    @State private var recordingToShare: AudioRecording?
     
     public init() {}
     
@@ -24,6 +28,11 @@ public struct ScreenBroadcastView: View {
                     audioDataSection
                 }
                 
+                // 录音列表
+                if !broadcastManager.audioRecordings.isEmpty {
+                    recordingsListSection
+                }
+                
                 Spacer(minLength: 50)
             }
             .padding(.horizontal, 20)
@@ -39,6 +48,19 @@ public struct ScreenBroadcastView: View {
             Button("确定") { }
         } message: {
             Text(alertMessage)
+        }
+        .sheet(isPresented: $showingPlayer) {
+            if let recording = selectedRecording {
+                AudioPlayerView(recording: recording)
+            }
+        }
+        .sheet(isPresented: $showingShareSheet) {
+            if let recording = recordingToShare {
+                ShareSheet(items: [recording.fileURL])
+            }
+        }
+        .onAppear {
+            broadcastManager.loadAudioRecordings()
         }
     }
     
@@ -153,8 +175,137 @@ public struct ScreenBroadcastView: View {
             
             // 音频帧计数
             InfoCard(title: "📊 音频数据", content: "已处理帧数: \(broadcastManager.audioFrameCount)")
+            
+            // 当前录制文件
+            if let fileName = broadcastManager.currentRecordingFileName {
+                InfoCard(title: "🎙️ 正在录制", content: fileName)
+            }
         }
     }
+    
+    // MARK: - Recordings List Section
+    private var recordingsListSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("📼 录音列表")
+                    .font(.headline)
+                
+                Spacer()
+                
+                Button(action: {
+                    broadcastManager.loadAudioRecordings()
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .foregroundColor(.blue)
+                }
+            }
+            
+            ForEach(broadcastManager.audioRecordings) { recording in
+                RecordingRow(
+                    recording: recording,
+                    onPlay: {
+                        selectedRecording = recording
+                        showingPlayer = true
+                    },
+                    onShare: {
+                        recordingToShare = recording
+                        showingShareSheet = true
+                    },
+                    onDelete: {
+                        broadcastManager.deleteRecording(recording)
+                    }
+                )
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+        )
+    }
+}
+
+// MARK: - Recording Row Component
+struct RecordingRow: View {
+    let recording: AudioRecording
+    let onPlay: () -> Void
+    let onShare: () -> Void
+    let onDelete: () -> Void
+    
+    @State private var showingDeleteAlert = false
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                // 文件信息
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(recording.fileName)
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                    
+                    HStack(spacing: 12) {
+                        Label(recording.formattedDuration, systemImage: "clock")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Label(recording.formattedFileSize, systemImage: "doc")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                // 操作按钮
+                HStack(spacing: 8) {
+                    // 播放按钮
+                    Button(action: onPlay) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    // 分享按钮
+                    Button(action: onShare) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.title3)
+                            .foregroundColor(.green)
+                    }
+                    
+                    // 删除按钮
+                    Button(action: {
+                        showingDeleteAlert = true
+                    }) {
+                        Image(systemName: "trash")
+                            .font(.title3)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+            
+            Divider()
+        }
+        .alert("删除录音", isPresented: $showingDeleteAlert) {
+            Button("取消", role: .cancel) { }
+            Button("删除", role: .destructive) {
+                onDelete()
+            }
+        } message: {
+            Text("确定要删除这个录音文件吗？")
+        }
+    }
+}
+
+// MARK: - Share Sheet
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        return controller
+    }
+    
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Info Card Component
