@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct ScreenBroadcastView: View {
     @StateObject private var broadcastManager = ScreenBroadcastManager()
+    @StateObject private var realtimeAudioManager = RealtimeAudioStreamManager()
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var selectedRecording: AudioRecording?
@@ -23,6 +24,9 @@ public struct ScreenBroadcastView: View {
                 // 控制按钮
                 controlButtonSection
                 
+                // 实时音频识别显示区域（常显）
+                realtimeRecognitionSection
+                
                 // 音频数据展示
                 if broadcastManager.isRecording {
                     audioDataSection
@@ -42,6 +46,19 @@ public struct ScreenBroadcastView: View {
             if let error = error, !error.isEmpty {
                 alertMessage = error
                 showingAlert = true
+            }
+        }
+        .onReceive(realtimeAudioManager.$errorMessage) { error in
+            if !error.isEmpty {
+                alertMessage = error
+                showingAlert = true
+            }
+        }
+        .onReceive(broadcastManager.$isRecording) { isRecording in
+            if isRecording {
+                realtimeAudioManager.startMonitoring()
+            } else {
+                realtimeAudioManager.stopMonitoring()
             }
         }
         .alert("提示", isPresented: $showingAlert) {
@@ -183,6 +200,50 @@ public struct ScreenBroadcastView: View {
         }
     }
     
+    // MARK: - Realtime Recognition Section
+    private var realtimeRecognitionSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("📻 实时语音识别")
+                    .font(.headline)
+                
+                Spacer()
+                
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(realtimeAudioManager.isProcessing ? Color.green : Color.gray)
+                        .frame(width: 8, height: 8)
+                    
+                    Text(realtimeAudioManager.isProcessing ? "识别中" : "未启动")
+                        .font(.caption)
+                        .foregroundColor(realtimeAudioManager.isProcessing ? .green : .gray)
+                }
+            }
+            
+            ScrollView {
+                Text(realtimeAudioManager.recognizedText.isEmpty ? 
+                     "开始直播后，系统音频将自动识别为文字显示在这里..." : 
+                     realtimeAudioManager.recognizedText)
+                    .font(.body)
+                    .foregroundColor(realtimeAudioManager.recognizedText.isEmpty ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+                    .padding(12)
+                    .background(Color(.systemBackground))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(.systemGray4), lineWidth: 1)
+                    )
+            }
+            .frame(maxHeight: 150)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.systemGray6))
+        )
+    }
+    
     // MARK: - Recordings List Section
     private var recordingsListSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -213,6 +274,9 @@ public struct ScreenBroadcastView: View {
                     },
                     onDelete: {
                         broadcastManager.deleteRecording(recording)
+                    },
+                    onConvert: {
+                        broadcastManager.convertRecordingToWAV(recording)
                     }
                 )
             }
@@ -231,6 +295,7 @@ struct RecordingRow: View {
     let onPlay: () -> Void
     let onShare: () -> Void
     let onDelete: () -> Void
+    let onConvert: () -> Void
     
     @State private var showingDeleteAlert = false
     
@@ -270,6 +335,15 @@ struct RecordingRow: View {
                         Image(systemName: "square.and.arrow.up")
                             .font(.title3)
                             .foregroundColor(.green)
+                    }
+                    
+                    // 转换按钮 - 只对M4A文件显示
+                    if recording.fileName.hasSuffix(".m4a") {
+                        Button(action: onConvert) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.title3)
+                                .foregroundColor(.orange)
+                        }
                     }
                     
                     // 删除按钮

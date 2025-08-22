@@ -2,12 +2,13 @@ import ReplayKit
 import Foundation
 import CoreMedia
 import AVFoundation
+import AudioToolbox
 import os.log
 
 @objc(ScreenBroadcastHandler)
 public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     
-    private let logger = Logger(subsystem: "dev.tuist.Siri.ScreenBroadcastExtension", category: "Broadcast")
+    private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
     private let appGroupID = "group.dev.tuist.Siri"
     
     // 状态管理
@@ -103,6 +104,9 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         
         // 保存音频数据到文件
         saveAudioToFile(sampleBuffer)
+        
+        // 发送实时音频数据给主程序进行识别
+        sendAudioDataForRecognition(sampleBuffer)
         
         // 计算音频电平
         let audioLevel = calculateAudioLevel(sampleBuffer: sampleBuffer)
@@ -285,20 +289,25 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         
         audioWriterInput?.markAsFinished()
         
+        // 保存URL的副本，防止在异步块中被清空
+        let audioFileURL = currentAudioFileURL
+        
         writer.finishWriting { [weak self] in
             if writer.status == .completed {
                 self?.logger.info("✅ 音频文件录制完成")
-                if let url = self?.currentAudioFileURL {
+                if let url = audioFileURL {
                     self?.notifyAudioFileCompleted(fileURL: url)
+                    self?.logger.info("📁 M4A文件已保存: \(url.lastPathComponent)")
                 }
             } else if let error = writer.error {
                 self?.logger.error("❌ 音频文件写入失败: \(error.localizedDescription)")
             }
+            
+            // 在异步块内清理引用
+            self?.audioWriter = nil
+            self?.audioWriterInput = nil
+            self?.currentAudioFileURL = nil
         }
-        
-        audioWriter = nil
-        audioWriterInput = nil
-        currentAudioFileURL = nil
     }
     
     private func saveAudioToFile(_ sampleBuffer: CMSampleBuffer) {
@@ -339,5 +348,248 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         ]
         
         writeToAppGroup(fileName: "audio_notification.json", data: notification)
+    }
+    
+    // MARK: - Realtime Audio Recognition
+    
+    private func sendAudioDataForRecognition(_ sampleBuffer: CMSampleBuffer) {
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            logger.error("❌ [Extension] 无法获取App Group容器")
+            return
+        }
+        
+        // 获取音频格式描述
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            logger.error("❌ [Extension] 无法获取音频格式描述")
+            return
+        }
+        
+        let audioStreamBasicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
+        guard let streamDescription = audioStreamBasicDescription else {
+            logger.error("❌ [Extension] 无法获取音频流描述")
+            return
+        }
+        
+        logger.info("🎵 [Extension] 音频格式 - 采样率: \(streamDescription.pointee.mSampleRate), 声道: \(streamDescription.pointee.mChannelsPerFrame), 格式: \(streamDescription.pointee.mFormatID)")
+        
+        // 提取音频数据
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            logger.error("❌ [Extension] 无法获取音频缓冲区")
+            return
+        }
+        
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        var dataLength: Int = 0
+        
+        let status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &dataLength, dataPointerOut: &dataPointer)
+        
+        guard status == noErr, let pointer = dataPointer, dataLength > 0 else {
+            logger.error("❌ [Extension] 音频数据指针获取失败")
+            return
+        }
+        
+        // 创建音频格式信息字典
+        let audioFormatInfo: [String: Any] = [
+            "sampleRate": streamDescription.pointee.mSampleRate,
+            "channels": streamDescription.pointee.mChannelsPerFrame,
+            "formatID": streamDescription.pointee.mFormatID,
+            "bitsPerChannel": streamDescription.pointee.mBitsPerChannel,
+            "bytesPerFrame": streamDescription.pointee.mBytesPerFrame,
+            "framesPerPacket": streamDescription.pointee.mFramesPerPacket,
+            "bytesPerPacket": streamDescription.pointee.mBytesPerPacket,
+            "dataLength": dataLength
+        ]
+        
+        // 将音频数据和格式信息分别写入共享内存
+        let audioData = Data(bytes: pointer, count: dataLength)
+        let bufferURL = containerURL.appendingPathComponent("realtime_audio_buffer.data")
+        let formatURL = containerURL.appendingPathComponent("realtime_audio_format.json")
+        
+        do {
+            // 写入音频数据
+            try audioData.write(to: bufferURL)
+            
+            // 写入格式信息
+            let formatData = try JSONSerialization.data(withJSONObject: audioFormatInfo, options: [])
+            try formatData.write(to: formatURL)
+            
+            // 发送Darwin通知告知主程序有新音频数据
+            let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
+            let notificationName = CFNotificationName("dev.tuist.Siri.audiodata" as CFString)
+            CFNotificationCenterPostNotification(darwinCenter, notificationName, nil, nil, true)
+            
+            logger.debug("✅ [Extension] 音频数据已发送: \(dataLength) bytes, 格式: \(streamDescription.pointee.mFormatID)")
+            
+        } catch {
+            logger.error("❌ [Extension] 写入音频数据失败: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - M4A to WAV Conversion
+    
+    private func convertM4AToWAV(m4aURL: URL) {
+        logger.info("📌 convertM4AToWAV 函数被调用")
+        logger.info("📂 输入文件: \(m4aURL.path)")
+        
+        // 检查输入文件是否存在
+        if !FileManager.default.fileExists(atPath: m4aURL.path) {
+            logger.error("❌ 输入文件不存在: \(m4aURL.path)")
+            return
+        }
+        
+        // 创建WAV文件路径
+        let wavFileName = m4aURL.lastPathComponent.replacingOccurrences(of: ".m4a", with: "_converted.wav")
+        let wavURL = m4aURL.deletingLastPathComponent().appendingPathComponent(wavFileName)
+        
+        logger.info("🔄 开始转换 M4A 到 WAV")
+        logger.info("📥 源文件: \(m4aURL.lastPathComponent)")
+        logger.info("📤 目标文件: \(wavFileName)")
+        logger.info("📍 目标路径: \(wavURL.path)")
+        
+        if convertM4AToWAVUsingExtAudioFile(inputURL: m4aURL, outputURL: wavURL) {
+            logger.info("✅ WAV转换成功: \(wavFileName)")
+            
+            // 验证输出文件是否存在
+            if FileManager.default.fileExists(atPath: wavURL.path) {
+                logger.info("✅ WAV文件已创建: \(wavURL.path)")
+                
+                // 获取文件大小
+                if let attributes = try? FileManager.default.attributesOfItem(atPath: wavURL.path),
+                   let fileSize = attributes[.size] as? Int64 {
+                    logger.info("📊 WAV文件大小: \(fileSize) bytes")
+                }
+            } else {
+                logger.error("❌ WAV文件创建失败，文件不存在")
+            }
+            
+            // 通知主程序WAV文件已创建
+            let notification: [String: Any] = [
+                "event": "wav_file_converted",
+                "fileName": wavFileName,
+                "filePath": wavURL.path,
+                "originalFile": m4aURL.lastPathComponent,
+                "timestamp": Date().timeIntervalSince1970
+            ]
+            
+            writeToAppGroup(fileName: "wav_conversion_notification.json", data: notification)
+        } else {
+            logger.error("❌ WAV转换失败")
+        }
+    }
+    
+    private func convertM4AToWAVUsingExtAudioFile(inputURL: URL, outputURL: URL) -> Bool {
+        var inputFile: ExtAudioFileRef?
+        var outputFile: ExtAudioFileRef?
+        
+        // 打开输入文件
+        var status = ExtAudioFileOpenURL(inputURL as CFURL, &inputFile)
+        guard status == noErr, let inputFile = inputFile else {
+            logger.error("❌ 无法打开输入文件: \(inputURL.lastPathComponent)")
+            return false
+        }
+        
+        // 获取输入文件格式
+        var inputFormat = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        ExtAudioFileGetProperty(inputFile, kExtAudioFileProperty_FileDataFormat, &size, &inputFormat)
+        
+        logger.info("📊 输入格式: 采样率=\(inputFormat.mSampleRate), 声道=\(inputFormat.mChannelsPerFrame)")
+        
+        // 设置输出格式 (WAV PCM) - 添加正确的字节序标志
+        var outputFormat = AudioStreamBasicDescription()
+        outputFormat.mSampleRate = inputFormat.mSampleRate
+        outputFormat.mFormatID = kAudioFormatLinearPCM
+        outputFormat.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian
+        outputFormat.mBitsPerChannel = 16
+        outputFormat.mChannelsPerFrame = inputFormat.mChannelsPerFrame
+        outputFormat.mBytesPerFrame = outputFormat.mChannelsPerFrame * 2
+        outputFormat.mFramesPerPacket = 1
+        outputFormat.mBytesPerPacket = outputFormat.mBytesPerFrame
+        
+        logger.info("📤 输出格式: PCM 16-bit, \(outputFormat.mSampleRate)Hz, \(outputFormat.mChannelsPerFrame)声道")
+        
+        // 创建输出文件
+        status = ExtAudioFileCreateWithURL(
+            outputURL as CFURL,
+            kAudioFileWAVEType,
+            &outputFormat,
+            nil,
+            AudioFileFlags.eraseFile.rawValue,
+            &outputFile
+        )
+        
+        guard status == noErr, let outputFile = outputFile else {
+            ExtAudioFileDispose(inputFile)
+            logger.error("❌ 无法创建输出文件: \(outputURL.lastPathComponent)")
+            return false
+        }
+        
+        // 设置客户端数据格式
+        status = ExtAudioFileSetProperty(inputFile, kExtAudioFileProperty_ClientDataFormat, size, &outputFormat)
+        guard status == noErr else {
+            logger.error("❌ 设置客户端数据格式失败: \(status)")
+            ExtAudioFileDispose(inputFile)
+            ExtAudioFileDispose(outputFile)
+            return false
+        }
+        
+        // 获取文件长度信息
+        var fileLengthFrames: Int64 = 0
+        var propertySize = UInt32(MemoryLayout<Int64>.size)
+        ExtAudioFileGetProperty(inputFile, kExtAudioFileProperty_FileLengthFrames, &propertySize, &fileLengthFrames)
+        logger.info("📏 输入文件总帧数: \(fileLengthFrames)")
+        
+        // 读取并写入数据
+        let bufferSize: UInt32 = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: Int(bufferSize))
+        defer { buffer.deallocate() }
+        
+        var bufferList = AudioBufferList()
+        bufferList.mNumberBuffers = 1
+        bufferList.mBuffers.mNumberChannels = outputFormat.mChannelsPerFrame
+        bufferList.mBuffers.mDataByteSize = bufferSize
+        bufferList.mBuffers.mData = UnsafeMutableRawPointer(buffer)
+        
+        var totalFrames: UInt32 = 0
+        
+        while true {
+            var frameCount: UInt32 = bufferSize / outputFormat.mBytesPerFrame
+            
+            // 重置buffer大小
+            bufferList.mBuffers.mDataByteSize = bufferSize
+            
+            status = ExtAudioFileRead(inputFile, &frameCount, &bufferList)
+            
+            if status != noErr {
+                logger.error("❌ 读取失败: 状态码=\(status)")
+                break
+            }
+            
+            if frameCount == 0 { 
+                logger.info("✅ 读取完成")
+                break 
+            }
+            
+            totalFrames += frameCount
+            
+            status = ExtAudioFileWrite(outputFile, frameCount, &bufferList)
+            guard status == noErr else {
+                logger.error("❌ 写入失败: 状态码=\(status)")
+                break
+            }
+            
+            // 每处理一定数量的帧输出进度
+            if totalFrames % 10000 == 0 {
+                logger.info("⏳ 已转换 \(totalFrames) 帧...")
+            }
+        }
+        
+        logger.info("📝 共转换 \(totalFrames) 帧音频数据")
+        
+        // 清理
+        ExtAudioFileDispose(inputFile)
+        ExtAudioFileDispose(outputFile)
+        
+        return true
     }
 }

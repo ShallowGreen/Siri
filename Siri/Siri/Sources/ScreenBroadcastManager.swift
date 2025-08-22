@@ -318,6 +318,31 @@ public class ScreenBroadcastManager: ObservableObject {
         }
     }
     
+    public func convertRecordingToWAV(_ recording: AudioRecording) {
+        // 只对M4A文件进行转换
+        guard recording.fileName.hasSuffix(".m4a") else {
+            logger.warning("⚠️ 只能转换M4A文件: \(recording.fileName)")
+            return
+        }
+        
+        logger.info("🔄 开始转换录音: \(recording.fileName)")
+        
+        // 在后台线程执行转换
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if let wavURL = self?.audioFileManager.convertM4AToWAV(m4aURL: recording.fileURL) {
+                DispatchQueue.main.async {
+                    self?.logger.info("✅ 转换完成: \(wavURL.lastPathComponent)")
+                    // 重新加载录音列表以显示新的WAV文件
+                    self?.loadAudioRecordings()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self?.logger.error("❌ 转换失败: \(recording.fileName)")
+                }
+            }
+        }
+    }
+    
     public func shareRecording(_ recording: AudioRecording) -> URL {
         return recording.fileURL
     }

@@ -3,7 +3,9 @@
     "allow": [
       "Bash(claude mcp:*)",
       "Bash(tuist generate:*)",
-      "Bash(xcodebuild:*)"
+      "Bash(xcodebuild:*)",
+      "WebSearch",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []
