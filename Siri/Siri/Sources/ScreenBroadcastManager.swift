@@ -284,7 +284,10 @@ public class ScreenBroadcastManager: ObservableObject {
     private func setupAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [])
+            // 确保从扬声器输出，支持与其他音频混合
+            try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // 强制设置音频路由到扬声器
+            try audioSession.overrideOutputAudioPort(.speaker)
             try audioSession.setActive(true)
             logger.info("🎵 音频会话设置成功")
         } catch {

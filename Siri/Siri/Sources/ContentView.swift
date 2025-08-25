@@ -54,11 +54,35 @@ public struct ContentView: View {
         }
         .onAppear {
             speechManager.requestAuthorization()
+            setupAudioRouteMonitoring()
         }
         .alert("错误", isPresented: $showingAlert) {
             Button("确定") { }
         } message: {
             Text(alertMessage)
+        }
+    }
+    
+    private func setupAudioRouteMonitoring() {
+        // 监听音频路由变化，确保始终使用扬声器
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            DispatchQueue.main.async {
+                self.forceAudioToSpeaker()
+            }
+        }
+    }
+    
+    private func forceAudioToSpeaker() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.overrideOutputAudioPort(.speaker)
+            print("🔊 强制音频路由到扬声器")
+        } catch {
+            print("❌ 设置扬声器输出失败: \(error.localizedDescription)")
         }
     }
     

@@ -34,8 +34,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     
     public override init() {
         super.init()
-        // 暂时移除音频会话设置，避免干扰原有录制功能
-        // setupAudioSession()
+        // 设置音频会话确保扬声器输出
+        setupAudioSession()
         speechRecognizer?.delegate = self
         setupDarwinNotifications()
     }
@@ -284,8 +284,11 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     private func setupAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            // 使用 playback 模式，保持原有的扬声器输出，同时支持与其他音频混合
-            try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers, .duckOthers])
+            // 使用 playback 模式，确保从扬声器输出，同时支持与其他音频混合
+            // 移除 .duckOthers 选项，避免干扰其他音频播放
+            try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // 强制设置音频路由到扬声器
+            try audioSession.overrideOutputAudioPort(.speaker)
             logger.info("🎵 音频会话设置成功 (playback + default)")
         } catch {
             logger.error("❌ 音频会话设置失败: \(error.localizedDescription)")
@@ -297,6 +300,14 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         
         guard !isProcessing else {
             return
+        }
+        
+        // 确保音频从扬声器输出
+        do {
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            logger.info("🔊 强制音频路由到扬声器")
+        } catch {
+            logger.error("❌ 设置扬声器输出失败: \(error.localizedDescription)")
         }
         
         isProcessing = true

@@ -108,9 +108,13 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
         
-        // Configure audio session - 使用 playAndRecord 避免与画中画的播放冲突
-        try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .mixWithOthers, .allowBluetooth])
+        // Configure audio session - 使用 playAndRecord 避免与画中画的播放冲突，确保音频从扬声器输出
+        // 移除 .duckOthers 选项，避免干扰其他音频播放
+        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        
+        // 强制设置音频路由到扬声器
+        try audioSession.overrideOutputAudioPort(.speaker)
         
         // Create recognition request
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
