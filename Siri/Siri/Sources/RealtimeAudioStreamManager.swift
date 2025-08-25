@@ -26,6 +26,12 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     private var processingQueue = DispatchQueue(label: "realtime.audio.processing", qos: .userInitiated)
     private var hasLoggedFormat = false
     
+    // 保存音频到m4a文件 - 完全模仿ScreenBroadcastHandler的方式
+    private var m4aAudioWriter: AVAssetWriter?
+    private var m4aAudioWriterInput: AVAssetWriterInput?
+    private var currentM4AFileURL: URL?
+    private var m4aStartTime: CMTime?
+    
     public override init() {
         super.init()
         // 暂时移除音频会话设置，避免干扰原有录制功能
@@ -116,6 +122,17 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     }
     
     private func processAudioData(_ data: Data, formatInfo: [String: Any]) {
+        // 首先，使用原始数据重建CMSampleBuffer并保存到m4a文件（完全模仿ScreenBroadcastHandler）
+        if let sampleBuffer = createSampleBufferFromData(data, formatInfo: formatInfo) {
+            saveOriginalAudioToFile(sampleBuffer)
+            
+            // 使用重建的CMSampleBuffer进行语音识别（数据源已验证正常）
+            if isProcessing, recognitionRequest != nil {
+                performSpeechRecognitionWithSampleBuffer(sampleBuffer)
+                return
+            }
+        }
+        
         guard isProcessing,
               let recognitionRequest = recognitionRequest else {
             return
@@ -139,16 +156,30 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         // 创建合适的音频格式
         var audioFormat: AVAudioFormat?
         
-        // 根据实际格式创建AVAudioFormat
+        // 根据实际格式创建AVAudioFormat - 使用与成功WAV转换相同的格式
         // kAudioFormatLinearPCM = 1819304813 ('lpcm') 是线性PCM格式的标识符
         if formatID == kAudioFormatLinearPCM || formatID == 1819304813 {
-            // PCM格式 - 使用非交错格式（参考正确的 demo）
-            if bitsPerChannel == 32 {
-                // 32位浮点 - 非交错格式
+            // PCM格式 - 参考成功的WAV转换格式
+            if bitsPerChannel == 16 {
+                // 16位整数 - 使用与WAV转换相同的格式参数
+                // 参考AudioFileManager中成功的转换格式：
+                // mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian
+                var asbd = AudioStreamBasicDescription()
+                asbd.mSampleRate = sampleRate
+                asbd.mFormatID = kAudioFormatLinearPCM
+                asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian
+                asbd.mBitsPerChannel = 16
+                asbd.mChannelsPerFrame = UInt32(channels)
+                asbd.mBytesPerFrame = asbd.mChannelsPerFrame * 2
+                asbd.mFramesPerPacket = 1
+                asbd.mBytesPerPacket = asbd.mBytesPerFrame
+                
+                audioFormat = AVAudioFormat(streamDescription: &asbd)
+                logger.info("🎵 使用WAV兼容格式: 16-bit signed integer, native endian, \(channels)声道")
+            } else if bitsPerChannel == 32 {
+                // 32位浮点 - 保持原有格式
                 audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false)
-            } else if bitsPerChannel == 16 {
-                // 16位整数 - 非交错格式
-                audioFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false)
+                logger.info("🎵 使用32位浮点格式")
             }
         }
         
@@ -171,35 +202,24 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         
         audioBuffer.frameLength = frameCount
         
-        // 复制音频数据 - 使用非交错格式（参考 demo 的正确做法）
-        data.withUnsafeBytes { rawBytes in
+        // 复制音频数据 - 16位格式使用交错数据（与WAV转换格式一致）
+        data.withUnsafeBytes { (rawBytes: UnsafeRawBufferPointer) in
             if bitsPerChannel == 16 {
-                // 16位整数数据 - 从交错转为非交错
-                guard let int16Pointer = rawBytes.bindMemory(to: Int16.self).baseAddress,
-                      let channelData = audioBuffer.int16ChannelData else {
+                // 16位整数数据 - 使用交错格式（与成功的WAV转换一致）
+                guard let int16Pointer = rawBytes.bindMemory(to: Int16.self).baseAddress else {
                     return
                 }
                 
-                if channels == 2 {
-                    // 立体声：将交错数据分离到两个通道（按 demo 方式）
-                    let leftChannel = channelData[0]
-                    let rightChannel = channelData[1]
+                // 对于交错格式，直接复制原始数据
+                if let audioDataPointer = audioBuffer.audioBufferList.pointee.mBuffers.mData {
+                    let sampleCount = Int(frameCount) * Int(channels)
+                    let audioInt16Pointer = audioDataPointer.bindMemory(to: Int16.self, capacity: sampleCount)
+                    audioInt16Pointer.initialize(from: int16Pointer, count: sampleCount)
                     
-                    for frame in 0..<Int(frameCount) {
-                        let interleavedIndex = frame * 2
-                        leftChannel[frame] = int16Pointer[interleavedIndex]     // 左声道
-                        rightChannel[frame] = int16Pointer[interleavedIndex + 1] // 右声道
-                    }
-                    
-                    let firstLeft = leftChannel[0]
-                    let firstRight = rightChannel[0]
-                    logger.info("🔍 非交错转换: L=\(firstLeft), R=\(firstRight), 帧数=\(frameCount)")
-                    
-                } else {
-                    // 单声道：直接复制（像Demo一样）
-                    let channel = channelData[0]
-                    channel.initialize(from: int16Pointer, count: Int(frameCount))
-                    logger.info("🔍 单声道复制: 首样本=\(channel[0]), 帧数=\(frameCount)")
+                    // 验证数据
+                    let firstSample = int16Pointer[0]
+                    let secondSample = channels > 1 ? int16Pointer[1] : firstSample
+                    logger.info("🔍 交错格式复制: 首样本=\(firstSample), 次样本=\(secondSample), 总样本数=\(sampleCount)")
                 }
                 
             } else if bitsPerChannel == 32 {
@@ -227,26 +247,33 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             }
         }
         
+        // 注意：这里我们不直接保存audioBuffer，因为它是转换后的格式
+        // 我们需要保存原始的CMSampleBuffer，但这里只有转换后的AVAudioPCMBuffer
+        // 所以m4a保存需要在processAudioData中进行，使用原始数据
+        
         // 保存转换后的音频数据用于验证
-        // saveConvertedAudioBuffer(audioBuffer)  // 暂时注释掉，只测试M4A到WAV转换
+        saveConvertedAudioBuffer(audioBuffer)  // 重新启用，测试新的交错格式
         
         // 发送到语音识别器
         recognitionRequest.append(audioBuffer)
     }
     
     private func calculateAudioLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
-        guard let channelData = audioBuffer.int16ChannelData?[0] else {
+        // 对于交错格式，使用audioBufferList访问数据
+        guard let audioDataPointer = audioBuffer.audioBufferList.pointee.mBuffers.mData else {
             return 0.0
         }
         
         let frameCount = Int(audioBuffer.frameLength)
         let channels = Int(audioBuffer.format.channelCount)
-        
-        var sum: Double = 0.0
         let sampleCount = frameCount * channels
         
+        let int16Pointer = audioDataPointer.bindMemory(to: Int16.self, capacity: sampleCount)
+        
+        var sum: Double = 0.0
+        
         for i in 0..<sampleCount {
-            let sample = Double(channelData[i]) / 32768.0 // 归一化到 -1.0 到 1.0
+            let sample = Double(int16Pointer[i]) / 32768.0 // 归一化到 -1.0 到 1.0
             sum += sample * sample
         }
         
@@ -275,8 +302,14 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         isProcessing = true
         hasLoggedFormat = false
         
-        // 开始录制转换后的音频用于验证
-        // startConvertedAudioRecording()  // 暂时注释掉，只测试M4A到WAV转换
+        // 重置m4a录制状态
+        m4aStartTime = nil
+        
+        // 开始m4a文件录制 - 完全模仿ScreenBroadcastHandler
+        startM4ARecording()
+        
+        // 开始录制转换后的音频用于验证 - 只保存WAV用于验证音频质量
+        startConvertedAudioRecording()  // 保存用于语音识别的音频数据为WAV格式
         
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest = recognitionRequest else {
@@ -291,23 +324,37 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 if let result = result {
                     let newText = result.bestTranscription.formattedString
+                    let isFinal = result.isFinal
+                    
+                    // 详细日志
+                    self?.logger.info("🎤 语音识别结果: '\(newText)' (最终结果: \(isFinal))")
                     
                     if !newText.isEmpty {
                         self?.recognizedText = newText
-                        self?.logger.info("🎯 识别: \(newText)")
+                        self?.logger.info("🎯 识别文本更新: \(newText)")
+                    } else {
+                        self?.logger.info("⚠️ 识别结果为空文本")
                     }
-                    
-                    // 删除最终结果日志，减少输出
+                } else {
+                    self?.logger.info("⚠️ 识别结果为 nil")
                 }
                 
                 if let error = error {
                     self?.logger.error("❌ 识别错误: \(error.localizedDescription)")
+                    self?.logger.error("❌ 错误详细信息: \(error)")
+                    
                     // 检查是否是"No speech detected"错误
-                    if error.localizedDescription.contains("No speech") {
+                    if error.localizedDescription.contains("No speech") || error.localizedDescription.contains("no speech") {
                         self?.logger.info("⚠️ 未检测到语音 - 可能音频内容为静音或音量过低")
                     }
+                    
+                    // 不要因为识别错误就停止整个识别过程，这样可以继续接收音频
                     self?.errorMessage = error.localizedDescription
-                    self?.stopRecognition()
+                } else {
+                    // 无错误时清空错误消息
+                    if self?.errorMessage != "" {
+                        self?.errorMessage = ""
+                    }
                 }
             }
         }
@@ -323,6 +370,9 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         recognitionRequest = nil
         recognitionTask = nil
         isProcessing = false
+        
+        // 停止m4a文件录制 - 模仿ScreenBroadcastHandler的stopAudioRecording
+        stopM4ARecording()
         
         // 停止录制转换后的音频
         // stopConvertedAudioRecording()  // 暂时注释掉，只测试M4A到WAV转换
@@ -343,141 +393,70 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     // MARK: - Converted Audio Recording for Verification
     
     private func startConvertedAudioRecording() {
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
-            return
-        }
-        
-        // 创建音频目录
-        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
-        if !FileManager.default.fileExists(atPath: audioDirectory.path) {
-            do {
-                try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                return
-            }
-        }
-        
-        // 创建转换后音频文件
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
-        let fileName = "ConvertedAudio_\(timestamp).m4a"
-        convertedAudioFileURL = audioDirectory.appendingPathComponent(fileName)
-        
-        guard let audioFileURL = convertedAudioFileURL else { return }
-        
-        // 设置音频写入器
-        do {
-            audioWriter = try AVAssetWriter(outputURL: audioFileURL, fileType: .m4a)
-            
-            // 配置音频设置 - 使用与转换后相同的格式
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 44100.0,
-                AVNumberOfChannelsKey: 2,
-                AVEncoderBitRateKey: 128000
-            ]
-            
-            audioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            audioWriterInput?.expectsMediaDataInRealTime = true
-            
-            if let input = audioWriterInput {
-                audioWriter?.add(input)
-                audioWriter?.startWriting()
-            }
-            
-            logger.info("🎙️ 开始录制转换后音频: \(fileName)")
-            
-        } catch {
-            logger.error("❌ 创建转换音频写入器失败: \(error.localizedDescription)")
-        }
+        // 简化：不再创建独立的音频文件，而是在结束时使用M4A文件转换
+        logger.info("🎙️ 开始语音识别会话 - 将在录制结束时从M4A文件创建验证WAV")
     }
     
     private func saveConvertedAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID),
-              let int16Data = audioBuffer.int16ChannelData else {
-            return
-        }
-        
-        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
-        let tempDataURL = audioDirectory.appendingPathComponent("converted_audio_temp.pcm")
+        // 简化：不再保存音频数据，专注于语音识别功能
+        // 验证音频质量的WAV文件将在录制结束时从M4A文件生成
         
         let frameCount = Int(audioBuffer.frameLength)
         let channels = Int(audioBuffer.format.channelCount)
-        let interleavedDataSize = frameCount * channels * MemoryLayout<Int16>.size
-        
-        // 将非交错数据转换为交错格式（WAV标准，参考demo正确做法）
-        var interleavedData = Data(capacity: interleavedDataSize)
-        
-        if channels == 2 {
-            // 立体声：交错左右声道
-            let leftChannel = int16Data[0]
-            let rightChannel = int16Data[1]
-            
-            for frame in 0..<frameCount {
-                // 交错格式：L, R, L, R, ...
-                withUnsafeBytes(of: leftChannel[frame]) { interleavedData.append(contentsOf: $0) }
-                withUnsafeBytes(of: rightChannel[frame]) { interleavedData.append(contentsOf: $0) }
-            }
-            
-            logger.info("💾 保存立体声数据: L首样本=\(leftChannel[0]), R首样本=\(rightChannel[0]), 帧数=\(frameCount)")
-            
-        } else {
-            // 单声道：直接复制（参考demo方式）
-            let channel = int16Data[0]
-            for frame in 0..<frameCount {
-                withUnsafeBytes(of: channel[frame]) { interleavedData.append(contentsOf: $0) }
-            }
-            
-            logger.info("💾 保存单声道数据: 首样本=\(channel[0]), 帧数=\(frameCount)")
-        }
-        
-        
-        do {
-            if FileManager.default.fileExists(atPath: tempDataURL.path) {
-                let fileHandle = try FileHandle(forWritingTo: tempDataURL)
-                defer { try? fileHandle.close() }
-                _ = try fileHandle.seekToEnd()
-                try fileHandle.write(contentsOf: interleavedData)
-            } else {
-                try interleavedData.write(to: tempDataURL)
-            }
-        } catch {
-            // 保存失败不影响主要功能
-        }
+        logger.debug("🔄 处理音频缓冲区: \(frameCount)帧, \(channels)声道")
     }
     
-    
     private func stopConvertedAudioRecording() {
-        // 将临时PCM数据转换为可播放的音频文件
+        // 使用最新的M4A文件转换为WAV用于验证语音识别音频质量
         guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
             return
         }
         
         let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
-        let tempDataURL = audioDirectory.appendingPathComponent("converted_audio_temp.pcm")
         
-        // 检查临时文件是否存在
-        guard FileManager.default.fileExists(atPath: tempDataURL.path) else {
-            logger.info("⚠️ 没有转换后的音频数据需要保存")
-            return
+        // 查找最新的M4A文件（与M4A转WAV转换使用相同数据源）
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: audioDirectory, includingPropertiesForKeys: [.creationDateKey])
+            
+            let m4aFiles = files.filter { $0.pathExtension == "m4a" && $0.lastPathComponent.hasPrefix("SystemAudio_") }
+                .sorted { file1, file2 in
+                    let date1 = (try? file1.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantPast
+                    let date2 = (try? file2.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantPast
+                    return date1 > date2
+                }
+            
+            guard let latestM4A = m4aFiles.first else {
+                logger.info("⚠️ 没有找到M4A文件用于验证")
+                return
+            }
+            
+            // 创建验证WAV文件名
+            let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
+            let fileName = "RealtimeRecognition_\(timestamp).wav"
+            let finalURL = audioDirectory.appendingPathComponent(fileName)
+            
+            // 使用与正常转换相同的方法转换M4A到WAV
+            let audioFileManager = AudioFileManager()
+            if let wavURL = audioFileManager.convertM4AToWAV(m4aURL: latestM4A) {
+                // 重命名为验证文件
+                try FileManager.default.moveItem(at: wavURL, to: finalURL)
+                logger.info("✅ 语音识别验证WAV文件已创建: \(fileName)")
+                notifyConvertedAudioFileCompleted(fileURL: finalURL)
+            } else {
+                logger.error("❌ M4A转WAV失败")
+            }
+            
+        } catch {
+            logger.error("❌ 查找M4A文件失败: \(error.localizedDescription)")
         }
         
-        // 创建最终的音频文件名
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
-        let fileName = "ConvertedAudio_\(timestamp).wav"
-        let finalURL = audioDirectory.appendingPathComponent(fileName)
-        
-        // 将PCM数据转换为WAV文件
-        convertPCMToWAV(inputURL: tempDataURL, outputURL: finalURL)
-        
         // 清理临时文件
+        let tempDataURL = audioDirectory.appendingPathComponent("realtime_recognition_temp.pcm")
         try? FileManager.default.removeItem(at: tempDataURL)
         
         audioWriter = nil
         audioWriterInput = nil
         convertedAudioFileURL = nil
-        
-        logger.info("✅ 转换后音频文件录制完成: \(fileName)")
-        notifyConvertedAudioFileCompleted(fileURL: finalURL)
     }
     
     private func convertPCMToWAV(inputURL: URL, outputURL: URL) {
@@ -543,6 +522,435 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             logger.info("📡 已通知转换后音频文件完成")
         } catch {
             logger.error("❌ 写入转换后音频通知失败: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - M4A Audio Recording
+    
+    // 完全模仿ScreenBroadcastHandler的startAudioRecording方法
+    private func startM4ARecording() {
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            logger.error("❌ 无法获取App Group容器路径")
+            return
+        }
+        
+        // 创建音频目录
+        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
+        if !FileManager.default.fileExists(atPath: audioDirectory.path) {
+            do {
+                try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                logger.error("❌ 创建音频目录失败: \(error.localizedDescription)")
+                return
+            }
+        }
+        
+        // 创建音频文件
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
+        let fileName = "RealtimeRecognition_\(timestamp).m4a"
+        currentM4AFileURL = audioDirectory.appendingPathComponent(fileName)
+        
+        guard let audioFileURL = currentM4AFileURL else { return }
+        
+        // 设置音频写入器 - 完全复制ScreenBroadcastHandler的配置
+        do {
+            m4aAudioWriter = try AVAssetWriter(outputURL: audioFileURL, fileType: .m4a)
+            
+            // 配置音频设置 - 与ScreenBroadcastHandler完全一致
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100.0,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128000
+            ]
+            
+            m4aAudioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            m4aAudioWriterInput?.expectsMediaDataInRealTime = true
+            
+            if let input = m4aAudioWriterInput {
+                m4aAudioWriter?.add(input)
+                m4aAudioWriter?.startWriting()
+            }
+            
+            logger.info("🎙️ 开始录制音频: \(fileName)")
+            
+            // 通知主程序新文件已创建
+            notifyM4AAudioFileCreated(fileName: fileName, fileURL: audioFileURL)
+            
+        } catch {
+            logger.error("❌ 创建音频写入器失败: \(error.localizedDescription)")
+        }
+    }
+    
+    // 完全模仿ScreenBroadcastHandler的saveAudioToFile方法
+    private func saveOriginalAudioToFile(_ sampleBuffer: CMSampleBuffer) {
+        guard let writer = m4aAudioWriter,
+              let input = m4aAudioWriterInput else {
+            logger.error("❌ m4aAudioWriter 或 m4aAudioWriterInput 为 nil")
+            return
+        }
+        
+        guard writer.status == .writing else {
+            logger.error("❌ AVAssetWriter状态不是writing: \(writer.status.rawValue)")
+            return
+        }
+        
+        guard input.isReadyForMoreMediaData else {
+            logger.warning("⚠️ AVAssetWriterInput 不准备接收更多数据")
+            return
+        }
+        
+        // 设置开始时间
+        if m4aStartTime == nil {
+            m4aStartTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            logger.info("🎵 准备开始M4A录制会话，时间戳: \(CMTimeGetSeconds(self.m4aStartTime!))")
+            
+            // 确保时间戳有效
+            guard CMTIME_IS_VALID(m4aStartTime!) && CMTIME_IS_NUMERIC(m4aStartTime!) else {
+                logger.error("❌ 无效的开始时间戳")
+                m4aStartTime = nil
+                return
+            }
+            
+            writer.startSession(atSourceTime: m4aStartTime!)
+            logger.info("✅ M4A录制会话已开始")
+        }
+        
+        // 写入音频数据 - 完全模仿ScreenBroadcastHandler
+        let success = input.append(sampleBuffer)
+        if success {
+            logger.debug("✅ 成功写入音频数据到M4A文件")
+        } else {
+            logger.error("❌ 写入音频数据到M4A文件失败")
+        }
+    }
+    
+    // 从原始音频数据重建CMSampleBuffer
+    private func createSampleBufferFromData(_ data: Data, formatInfo: [String: Any]) -> CMSampleBuffer? {
+        guard let sampleRate = formatInfo["sampleRate"] as? Double,
+              let channels = formatInfo["channels"] as? UInt32,
+              let formatID = formatInfo["formatID"] as? UInt32,
+              let formatFlags = formatInfo["formatFlags"] as? UInt32,  // 关键：读取formatFlags
+              let bitsPerChannel = formatInfo["bitsPerChannel"] as? UInt32,
+              let bytesPerFrame = formatInfo["bytesPerFrame"] as? UInt32,
+              let framesPerPacket = formatInfo["framesPerPacket"] as? UInt32,
+              let bytesPerPacket = formatInfo["bytesPerPacket"] as? UInt32 else {
+            logger.error("❌ 音频格式信息不完整: \(formatInfo)")
+            return nil
+        }
+        
+        logger.info("🔍 重建CMSampleBuffer - 数据大小: \(data.count)bytes, 格式: \(sampleRate)Hz, \(channels)声道, \(bitsPerChannel)位, formatID: \(formatID), flags: \(formatFlags)")
+        
+        // 创建音频流基本描述
+        var asbd = AudioStreamBasicDescription()
+        asbd.mSampleRate = sampleRate
+        asbd.mFormatID = formatID
+        asbd.mChannelsPerFrame = channels
+        asbd.mBitsPerChannel = bitsPerChannel
+        asbd.mBytesPerFrame = bytesPerFrame
+        asbd.mFramesPerPacket = framesPerPacket
+        asbd.mBytesPerPacket = bytesPerPacket
+        // 关键：直接使用从扩展程序发送的原始formatFlags
+        asbd.mFormatFlags = formatFlags
+        
+        logger.info("🎵 使用原始音频格式标志: \(formatFlags)")
+        
+        // 创建音频格式描述
+        var formatDescription: CMAudioFormatDescription?
+        let formatStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDescription
+        )
+        
+        guard formatStatus == noErr, let audioFormatDescription = formatDescription else {
+            logger.error("❌ 创建音频格式描述失败: \(formatStatus)")
+            return nil
+        }
+        
+        // 创建CMBlockBuffer - 使用拷贝方式确保数据安全
+        var blockBuffer: CMBlockBuffer?
+        let blockBufferStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,  // 让系统分配内存
+            blockLength: data.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: data.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        
+        // 将数据拷贝到CMBlockBuffer中
+        if blockBufferStatus == noErr, let audioBlockBuffer = blockBuffer {
+            let copyStatus = data.withUnsafeBytes { dataPtr in
+                CMBlockBufferReplaceDataBytes(
+                    with: dataPtr.baseAddress!,
+                    blockBuffer: audioBlockBuffer,
+                    offsetIntoDestination: 0,
+                    dataLength: data.count
+                )
+            }
+            
+            if copyStatus != noErr {
+                logger.error("❌ 拷贝音频数据到CMBlockBuffer失败: \(copyStatus)")
+                return nil
+            }
+        }
+        
+        guard blockBufferStatus == noErr, let audioBlockBuffer = blockBuffer else {
+            logger.error("❌ 创建CMBlockBuffer失败: \(blockBufferStatus)")
+            return nil
+        }
+        
+        // 创建时间戳信息
+        let frameCount = data.count / Int(bytesPerFrame)
+        var sampleTiming = CMSampleTimingInfo()
+        sampleTiming.duration = CMTime(value: CMTimeValue(frameCount), timescale: CMTimeScale(sampleRate))
+        sampleTiming.presentationTimeStamp = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * sampleRate), timescale: CMTimeScale(sampleRate))
+        sampleTiming.decodeTimeStamp = CMTime.invalid
+        
+        // 创建CMSampleBuffer
+        var sampleBuffer: CMSampleBuffer?
+        let sampleBufferStatus = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: audioBlockBuffer,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: audioFormatDescription,
+            sampleCount: CMItemCount(frameCount),
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &sampleTiming,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        
+        guard sampleBufferStatus == noErr else {
+            logger.error("❌ 创建CMSampleBuffer失败: \(sampleBufferStatus)")
+            return nil
+        }
+        
+        return sampleBuffer
+    }
+    
+    // MARK: - Speech Recognition with CMSampleBuffer
+    
+    private func performSpeechRecognitionWithSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard let recognitionRequest = recognitionRequest else {
+            logger.warning("⚠️ 语音识别请求为空")
+            return
+        }
+        
+        // 从 CMSampleBuffer 创建 AVAudioPCMBuffer 用于语音识别
+        guard let audioBuffer = createAudioPCMBufferFromSampleBuffer(sampleBuffer) else {
+            logger.warning("⚠️ 从CMSampleBuffer创建AVAudioPCMBuffer失败")
+            return
+        }
+        
+        // 检查音频数据是否有效（不是静音）
+        let audioLevel = calculateSimpleAudioLevel(from: audioBuffer)
+        logger.info("🎵 语音识别音频电平: \(String(format: "%.6f", audioLevel))")
+        
+        if audioLevel < 0.001 {
+            logger.warning("⚠️ 音频电平太低，可能是静音数据")
+        }
+        
+        // 保存转换后的音频数据用于验证
+        saveConvertedAudioBuffer(audioBuffer)
+        
+        // 发送到语音识别器
+        recognitionRequest.append(audioBuffer)
+        
+        logger.debug("✅ 使用重建的CMSampleBuffer进行语音识别 (电平: \(String(format: "%.6f", audioLevel)))")
+    }
+    
+    private func calculateSimpleAudioLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
+        guard audioBuffer.frameLength > 0 else { return 0.0 }
+        
+        let format = audioBuffer.format
+        let frameCount = Int(audioBuffer.frameLength)
+        let channels = Int(format.channelCount)
+        
+        var sum: Double = 0.0
+        var sampleCount = 0
+        
+        // 处理交错格式的音频数据
+        if let audioData = audioBuffer.audioBufferList.pointee.mBuffers.mData {
+            if format.commonFormat == .pcmFormatInt16 {
+                // 16位整数格式
+                let int16Pointer = audioData.bindMemory(to: Int16.self, capacity: frameCount * channels)
+                for i in 0..<(frameCount * channels) {
+                    let sample = Double(int16Pointer[i]) / 32768.0
+                    sum += sample * sample
+                    sampleCount += 1
+                }
+            } else if format.commonFormat == .pcmFormatFloat32 {
+                // 32位浮点格式
+                let floatPointer = audioData.bindMemory(to: Float.self, capacity: frameCount * channels)
+                for i in 0..<(frameCount * channels) {
+                    let sample = Double(floatPointer[i])
+                    sum += sample * sample
+                    sampleCount += 1
+                }
+            }
+        }
+        
+        guard sampleCount > 0 else { return 0.0 }
+        
+        let rms = sqrt(sum / Double(sampleCount))
+        return rms
+    }
+    
+    private func createAudioPCMBufferFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            logger.error("❌ 无法获取CMSampleBuffer格式描述")
+            return nil
+        }
+        
+        let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
+        guard let audioStreamDescription = streamDescription else {
+            logger.error("❌ 无法获取音频流描述")
+            return nil
+        }
+        
+        logger.info("🔍 输入音频格式: \(audioStreamDescription.pointee.mSampleRate)Hz, \(audioStreamDescription.pointee.mChannelsPerFrame)声道, \(audioStreamDescription.pointee.mBitsPerChannel)位")
+        
+        // 简化：直接使用原始格式进行语音识别，不进行复杂的格式转换
+        guard let inputAVFormat = AVAudioFormat(streamDescription: audioStreamDescription) else {
+            logger.error("❌ 创建输入音频格式失败")
+            return nil
+        }
+        
+        // 获取输入数据
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            logger.error("❌ 无法获取CMSampleBuffer数据缓冲区")
+            return nil
+        }
+        
+        let dataLength = CMBlockBufferGetDataLength(blockBuffer)
+        let inputFrameCount = AVAudioFrameCount(dataLength / Int(audioStreamDescription.pointee.mBytesPerFrame))
+        
+        logger.info("🔍 音频数据: 长度=\(dataLength)字节, 帧数=\(inputFrameCount)")
+        
+        guard inputFrameCount > 0 else {
+            logger.warning("⚠️ 音频帧数为0，跳过处理")
+            return nil
+        }
+        
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputAVFormat, frameCapacity: inputFrameCount) else {
+            logger.error("❌ 创建输入PCM缓冲区失败")
+            return nil
+        }
+        
+        // 复制数据到输入缓冲区
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let result = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: nil, dataPointerOut: &dataPointer)
+        
+        guard result == noErr, let data = dataPointer else {
+            logger.error("❌ 无法获取音频数据指针: \(result)")
+            return nil
+        }
+        
+        // 直接复制音频数据
+        let audioBufferList = inputBuffer.mutableAudioBufferList
+        audioBufferList.pointee.mBuffers.mData?.copyMemory(from: data, byteCount: dataLength)
+        audioBufferList.pointee.mBuffers.mDataByteSize = UInt32(dataLength)
+        inputBuffer.frameLength = inputFrameCount
+        
+        logger.info("✅ 音频PCM缓冲区创建成功: \(inputFrameCount)帧")
+        
+        return inputBuffer
+    }
+    
+    // 完全模仿ScreenBroadcastHandler的stopAudioRecording方法
+    private func stopM4ARecording() {
+        guard let writer = m4aAudioWriter else { return }
+        
+        m4aAudioWriterInput?.markAsFinished()
+        
+        // 保存URL的副本，防止在异步块中被清空
+        let audioFileURL = currentM4AFileURL
+        
+        writer.finishWriting { [weak self] in
+            if writer.status == .completed {
+                self?.logger.info("✅ 音频文件录制完成")
+                if let url = audioFileURL {
+                    Task { @MainActor in
+                        self?.notifyM4AAudioFileCompleted(fileURL: url)
+                    }
+                    self?.logger.info("📁 音频文件已保存: \(url.lastPathComponent)")
+                }
+            } else if let error = writer.error {
+                self?.logger.error("❌ 音频文件写入失败: \(error.localizedDescription)")
+            }
+            
+            // 清理引用
+            Task { @MainActor in
+                self?.m4aAudioWriter = nil
+                self?.m4aAudioWriterInput = nil
+                self?.currentM4AFileURL = nil
+                self?.m4aStartTime = nil  // 确保重置开始时间
+            }
+        }
+    }
+    
+    private func notifyM4AAudioFileCreated(fileName: String, fileURL: URL) {
+        let notification: [String: Any] = [
+            "event": "audio_file_created",
+            "fileName": fileName,
+            "filePath": fileURL.path,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+        
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            return
+        }
+        
+        let notificationURL = containerURL.appendingPathComponent("realtime_audio_notification.json")
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: notification, options: [])
+            try jsonData.write(to: notificationURL)
+            logger.info("📡 已通知M4A音频文件创建")
+        } catch {
+            logger.error("❌ 写入M4A音频创建通知失败: \(error.localizedDescription)")
+        }
+    }
+    
+    private func notifyM4AAudioFileCompleted(fileURL: URL) {
+        let notification: [String: Any] = [
+            "event": "audio_file_completed",
+            "fileName": fileURL.lastPathComponent,
+            "filePath": fileURL.path,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+        
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            return
+        }
+        
+        let notificationURL = containerURL.appendingPathComponent("realtime_audio_notification.json")
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: notification, options: [])
+            try jsonData.write(to: notificationURL)
+            
+            // 发送Darwin通知
+            let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
+            let notificationName = CFNotificationName("dev.tuist.Siri.realtimeAudioSaved" as CFString)
+            CFNotificationCenterPostNotification(darwinCenter, notificationName, nil, nil, true)
+            
+            logger.info("📡 已通知M4A音频文件完成")
+        } catch {
+            logger.error("❌ 写入M4A音频完成通知失败: \(error.localizedDescription)")
         }
     }
 }

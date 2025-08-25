@@ -46,7 +46,7 @@ public struct ContentView: View {
                 }
             
             // 屏幕直播 Tab
-            ScreenBroadcastView()
+            ScreenBroadcastView(pipManager: pipManager)
                 .tabItem {
                     Image(systemName: "tv")
                     Text("屏幕直播")
@@ -188,8 +188,8 @@ public struct ContentView: View {
         .padding(.horizontal, 20)
         .background(Color(.systemGroupedBackground))
         .onReceive(speechManager.$recognizedText) { text in
-            // Update PiP with recognized text
-            pipManager.updateText(text)
+            // Update PiP with microphone recognized text
+            pipManager.updateMicrophoneText(text)
         }
         .onReceive(speechManager.$errorMessage) { error in
             if !error.isEmpty {

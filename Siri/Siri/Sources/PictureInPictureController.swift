@@ -95,6 +95,8 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     @Published public var canStartPip: Bool = false
     @Published public var errorMessage: String = ""
     @Published public var recognizedText: String = ""
+    @Published public var microphoneText: String = ""
+    @Published public var mediaText: String = ""
     
     // MARK: - Private Properties
     private var pipController: AVPictureInPictureController?
@@ -114,8 +116,47 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     // MARK: - Public Methods
     public func updateText(_ text: String) {
         recognizedText = text
-        pipTextView?.updateText(text)
+        updateCombinedText()
         print("📝 [PiP] 更新识别文字: \(text)")
+    }
+    
+    public func updateMicrophoneText(_ text: String) {
+        microphoneText = text
+        updateCombinedText()
+        print("🎤 [PiP] 更新麦克风文字: \(text)")
+    }
+    
+    public func updateMediaText(_ text: String) {
+        mediaText = text
+        updateCombinedText()
+        print("📺 [PiP] 更新媒体声音文字: \(text)")
+    }
+    
+    private func updateCombinedText() {
+        var combinedText = ""
+        
+        // 添加麦克风识别的文字
+        if !microphoneText.isEmpty {
+            combinedText += "麦克风：\(microphoneText)"
+        }
+        
+        // 添加媒体声音识别的文字
+        if !mediaText.isEmpty {
+            if !combinedText.isEmpty {
+                combinedText += "\n\n"
+            }
+            combinedText += "媒体声音：\(mediaText)"
+        }
+        
+        // 如果都为空，显示等待信息
+        if combinedText.isEmpty {
+            combinedText = "等待语音输入..."
+        }
+        
+        // 更新显示的文字
+        recognizedText = combinedText
+        pipTextView?.updateText(combinedText)
+        print("🔄 [PiP] 更新组合文字: \(combinedText)")
     }
     
     public func startPictureInPicture() {

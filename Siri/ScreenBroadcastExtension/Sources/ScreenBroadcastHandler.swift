@@ -393,6 +393,7 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
             "sampleRate": streamDescription.pointee.mSampleRate,
             "channels": streamDescription.pointee.mChannelsPerFrame,
             "formatID": streamDescription.pointee.mFormatID,
+            "formatFlags": streamDescription.pointee.mFormatFlags,  // 关键：添加formatFlags
             "bitsPerChannel": streamDescription.pointee.mBitsPerChannel,
             "bytesPerFrame": streamDescription.pointee.mBytesPerFrame,
             "framesPerPacket": streamDescription.pointee.mFramesPerPacket,

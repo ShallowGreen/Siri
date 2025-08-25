@@ -10,7 +10,11 @@ public struct ScreenBroadcastView: View {
     @State private var showingShareSheet = false
     @State private var recordingToShare: AudioRecording?
     
-    public init() {}
+    let pipManager: PictureInPictureManager?
+    
+    public init(pipManager: PictureInPictureManager? = nil) {
+        self.pipManager = pipManager
+    }
     
     public var body: some View {
         ScrollView {
@@ -60,6 +64,10 @@ public struct ScreenBroadcastView: View {
             } else {
                 realtimeAudioManager.stopMonitoring()
             }
+        }
+        .onReceive(realtimeAudioManager.$recognizedText) { text in
+            // Update PiP with media audio recognized text
+            pipManager?.updateMediaText(text)
         }
         .alert("提示", isPresented: $showingAlert) {
             Button("确定") { }

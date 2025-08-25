@@ -22,6 +22,7 @@ public class ScreenBroadcastManager: ObservableObject {
     private var statusCheckTimer: Timer?
     private let audioFileManager = AudioFileManager()
     private var audioPlayer: AVAudioPlayer?
+    private var darwinNotificationCenter: CFNotificationCenter?
     
     // MARK: - Initialization
     
@@ -30,10 +31,12 @@ public class ScreenBroadcastManager: ObservableObject {
         clearPreviousData()
         loadAudioRecordings()
         setupAudioSession()
+        setupDarwinNotifications()
     }
     
     deinit {
         stopStatusMonitoring()
+        removeDarwinNotifications()
     }
     
     // MARK: - Public Methods
@@ -366,8 +369,64 @@ public class ScreenBroadcastManager: ObservableObject {
                 self.logger.info("✅ 音频文件完成")
             }
             
+            
         default:
             break
+        }
+    }
+    
+    // MARK: - Darwin Notifications
+    
+    private func setupDarwinNotifications() {
+        darwinNotificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
+        
+        // 监听实时音频保存通知
+        let notificationName = "dev.tuist.Siri.realtimeAudioSaved" as CFString
+        let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        
+        CFNotificationCenterAddObserver(
+            darwinNotificationCenter,
+            observer,
+            { (center, observer, name, object, userInfo) in
+                guard let observer = observer else { return }
+                let manager = Unmanaged<ScreenBroadcastManager>.fromOpaque(observer).takeUnretainedValue()
+                manager.handleRealtimeAudioSavedNotification()
+            },
+            notificationName,
+            nil,
+            .deliverImmediately
+        )
+        
+        logger.info("📡 Darwin通知监听已设置")
+    }
+    
+    private func removeDarwinNotifications() {
+        guard let center = darwinNotificationCenter else { return }
+        
+        let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        CFNotificationCenterRemoveObserver(
+            center,
+            observer,
+            CFNotificationName("dev.tuist.Siri.realtimeAudioSaved" as CFString),
+            nil
+        )
+        
+        logger.info("📡 Darwin通知监听已移除")
+    }
+    
+    private func handleRealtimeAudioSavedNotification() {
+        logger.info("📱 收到实时音频保存通知")
+        
+        // 读取通知文件获取详细信息
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            return
+        }
+        
+        let notificationURL = containerURL.appendingPathComponent("realtime_audio_notification.json")
+        
+        if let data = try? Data(contentsOf: notificationURL),
+           let notification = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            processAudioNotification(notification)
         }
     }
 }
