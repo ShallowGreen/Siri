@@ -1,8 +1,11 @@
 import SwiftUI
+import AVFoundation
+import MediaPlayer
 
 public struct ScreenBroadcastView: View {
     @StateObject private var broadcastManager = ScreenBroadcastManager()
     @StateObject private var realtimeAudioManager = RealtimeAudioStreamManager()
+    @StateObject private var inaudibleAudioPlayer = InaudibleAudioPlayer()
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var selectedRecording: AudioRecording?
@@ -156,13 +159,101 @@ public struct ScreenBroadcastView: View {
             }
             .disabled(false)
             
+            // 音频控制按钮区域
+            VStack(spacing: 12) {
+                // 中断音乐按钮
+                Button(action: {
+                    inaudibleAudioPlayer.playInaudibleSound()
+                }) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.title2)
+                        
+                        Text("中断后台音乐")
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.orange)
+                    )
+                }
+                
+                // 恢复音乐按钮
+                Button(action: {
+                    inaudibleAudioPlayer.resumeBackgroundMusicComprehensive()
+                }) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                        
+                        Text("恢复后台音乐")
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.green)
+                    )
+                }
+                .opacity(inaudibleAudioPlayer.lastInterruptionTime != nil ? 1.0 : 0.6)
+                .disabled(inaudibleAudioPlayer.lastInterruptionTime == nil)
+                
+                // 音频控制方法选择器
+                HStack(spacing: 8) {
+                    Button("会话重置") {
+                        inaudibleAudioPlayer.resumeBackgroundMusicViaSessionReset()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button("远程命令") {
+                        inaudibleAudioPlayer.resumeBackgroundMusicViaRemoteCommand()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button("通知恢复") {
+                        inaudibleAudioPlayer.resumeBackgroundMusicViaNotification()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .opacity(inaudibleAudioPlayer.lastInterruptionTime != nil ? 1.0 : 0.4)
+                .disabled(inaudibleAudioPlayer.lastInterruptionTime == nil)
+            }
+            
             // 说明文字
-            Text(broadcastManager.isRecording ? 
-                 "点击停止按钮将结束屏幕直播" : 
-                 "点击显示直播选择器，然后在系统弹窗中选择开始")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+            VStack(spacing: 8) {
+                Text(broadcastManager.isRecording ? 
+                     "点击停止按钮将结束屏幕直播" : 
+                     "点击显示直播选择器，然后在系统弹窗中选择开始")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                
+                Text("🔴 中断按钮: 播放高频不可听声音暂停后台音乐")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                
+                Text("🟢 恢复按钮: 使用多种方法尝试恢复后台音乐播放")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                
+                if let lastTime = inaudibleAudioPlayer.lastInterruptionTime {
+                    Text("最近中断时间: \(lastTime.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
         }
     }
     
@@ -412,6 +503,176 @@ struct InfoCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.systemGray6))
         )
+    }
+}
+
+// MARK: - Inaudible Audio Player
+class InaudibleAudioPlayer: ObservableObject {
+    private var audioPlayer: AVAudioPlayer?
+    private var inaudibleAudioURL: URL?
+    @Published var lastInterruptionTime: Date?
+    
+    init() {
+        setupInaudibleAudio()
+    }
+    
+    private func setupInaudibleAudio() {
+        // 获取预生成的高频音频文件
+        let appGroupID = "group.dev.tuist.Siri"
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            print("❌ 无法获取App Group容器路径")
+            return
+        }
+        
+        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
+        let fileName = "InaudibleAudio.wav"
+        let fileURL = audioDirectory.appendingPathComponent(fileName)
+        
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            inaudibleAudioURL = fileURL
+            print("✅ 找到高频音频文件: \(fileName)")
+        } else {
+            print("❌ 高频音频文件不存在: \(fileName)")
+        }
+    }
+    
+    func playInaudibleSound() {
+        guard let audioURL = inaudibleAudioURL else {
+            print("❌ 高频音频文件未准备好")
+            return
+        }
+        
+        do {
+            // 配置音频会话，确保能够中断其他音频
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            
+            // 创建音频播放器
+            audioPlayer = try AVAudioPlayer(contentsOf: audioURL)
+            audioPlayer?.prepareToPlay()
+            
+            // 播放高频音频
+            if audioPlayer?.play() == true {
+                print("🔊 播放高频不可听音频，尝试中断后台音乐")
+                lastInterruptionTime = Date()
+                
+                // 播放完成后恢复音频会话设置
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    do {
+                        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+                        try audioSession.overrideOutputAudioPort(.speaker)
+                        print("✅ 音频会话已恢复到正常设置")
+                    } catch {
+                        print("❌ 恢复音频会话失败: \(error.localizedDescription)")
+                    }
+                }
+            } else {
+                print("❌ 播放高频音频失败")
+            }
+        } catch {
+            print("❌ 播放高频音频错误: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Resume Background Music Methods
+    
+    /// 方法1: 通过重置音频会话来恢复后台音乐
+    func resumeBackgroundMusicViaSessionReset() {
+        print("🎵 尝试通过音频会话重置恢复后台音乐")
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // 首先完全停用音频会话
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            
+            // 短暂延迟后重新激活，允许其他应用重新获得音频焦点
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                do {
+                    // 设置为ambient类别，不会中断其他音频
+                    try audioSession.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+                    try audioSession.setActive(true)
+                    
+                    print("✅ 音频会话已重置，后台音乐应该可以恢复")
+                    
+                    // 再次延迟后恢复到正常设置
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        do {
+                            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+                            try audioSession.overrideOutputAudioPort(.speaker)
+                            print("✅ 音频会话已恢复到应用正常设置")
+                        } catch {
+                            print("❌ 恢复应用音频设置失败: \(error.localizedDescription)")
+                        }
+                    }
+                } catch {
+                    print("❌ 重新激活音频会话失败: \(error.localizedDescription)")
+                }
+            }
+        } catch {
+            print("❌ 停用音频会话失败: \(error.localizedDescription)")
+        }
+    }
+    
+    /// 方法2: 使用MPRemoteCommandCenter发送播放命令
+    func resumeBackgroundMusicViaRemoteCommand() {
+        print("🎵 尝试通过远程命令恢复后台音乐")
+        
+        // 这个方法在实际设备中可能不会工作，因为应用无法直接控制其他应用的媒体播放
+        // 但可以尝试配置远程控制事件
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            // 先激活会话以获得远程控制权限
+            try audioSession.setActive(true)
+            
+            // 短暂延迟后释放控制权，让系统恢复之前的音频应用
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                do {
+                    try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+                    print("✅ 已释放音频会话控制权")
+                } catch {
+                    print("❌ 释放音频会话失败: \(error.localizedDescription)")
+                }
+            }
+        } catch {
+            print("❌ 激活音频会话失败: \(error.localizedDescription)")
+        }
+    }
+    
+    /// 方法3: 通过通知中心尝试恢复
+    func resumeBackgroundMusicViaNotification() {
+        print("🎵 尝试通过通知恢复后台音乐")
+        
+        // 发送音频中断结束通知
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [
+                AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+                AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
+            ]
+        )
+        
+        print("📢 已发送音频中断结束通知")
+    }
+    
+    /// 方法4: 综合恢复方法（推荐使用）
+    func resumeBackgroundMusicComprehensive() {
+        print("🎵 使用综合方法恢复后台音乐")
+        
+        // 先尝试音频会话重置
+        resumeBackgroundMusicViaSessionReset()
+        
+        // 延迟后尝试远程命令
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            self.resumeBackgroundMusicViaRemoteCommand()
+        }
+        
+        // 最后发送通知
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            self.resumeBackgroundMusicViaNotification()
+        }
     }
 }
 

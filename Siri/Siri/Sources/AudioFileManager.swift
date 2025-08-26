@@ -289,6 +289,81 @@ public class AudioFileManager {
         
         return totalFrames > 0
     }
+    
+    /// 生成高频不可听的M4A音频文件
+    public func generateInaudibleAudioFile() -> URL? {
+        logger.info("🔊 开始生成高频不可听音频文件...")
+        
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            logger.error("❌ 无法获取App Group容器路径")
+            return nil
+        }
+        
+        let audioDirectory = containerURL.appendingPathComponent("AudioRecordings")
+        if !FileManager.default.fileExists(atPath: audioDirectory.path) {
+            do {
+                try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                logger.error("❌ 创建音频目录失败: \(error.localizedDescription)")
+                return nil
+            }
+        }
+        
+        let fileName = "InaudibleAudio.wav"
+        let fileURL = audioDirectory.appendingPathComponent(fileName)
+        
+        // 如果文件已存在，直接返回
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            logger.info("✅ 高频音频文件已存在: \(fileName)")
+            return fileURL
+        }
+        
+        // 音频参数
+        let sampleRate: Double = 44100.0  // 44.1kHz
+        let duration: Double = 0.1        // 0.1秒
+        let frequency: Double = 22000.0   // 22kHz - 人耳听不到
+        let amplitude: Float = 0.1        // 较小的音量，避免干扰
+        
+        let frameCount = Int(sampleRate * duration)
+        
+        // 设置音频格式 - 使用PCM格式便于WAV文件写入
+        let audioFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
+        
+        // 创建音频缓冲区
+        guard let audioBuffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            logger.error("❌ 无法创建音频缓冲区")
+            return nil
+        }
+        
+        audioBuffer.frameLength = AVAudioFrameCount(frameCount)
+        
+        // 生成高频正弦波
+        guard let leftChannel = audioBuffer.floatChannelData?[0],
+              let rightChannel = audioBuffer.floatChannelData?[1] else {
+            logger.error("❌ 无法获取音频通道数据")
+            return nil
+        }
+        
+        for frame in 0..<frameCount {
+            let time = Double(frame) / sampleRate
+            let sample = Float(sin(2.0 * Double.pi * frequency * time)) * amplitude
+            leftChannel[frame] = sample
+            rightChannel[frame] = sample
+        }
+        
+        // 使用AVAudioFile直接写入WAV文件
+        do {
+            let audioFile = try AVAudioFile(forWriting: fileURL, settings: audioFormat.settings)
+            try audioFile.write(from: audioBuffer)
+            
+            logger.info("✅ 高频音频文件生成成功: \(fileName)")
+            return fileURL
+            
+        } catch {
+            logger.error("❌ 创建音频文件失败: \(error.localizedDescription)")
+            return nil
+        }
+    }
 }
 
 // MARK: - Audio Recording Model
