@@ -8,21 +8,24 @@ import AVFoundation
 public class PictureInPictureTextView: UIView {
     
     // MARK: - UI Components
-    private let textLabel: UILabel = {
-        let label = UILabel()
-        label.numberOfLines = 0
-        label.textAlignment = .center
-        label.font = UIFont.systemFont(ofSize: 18, weight: .medium)
-        label.textColor = .white
-        label.backgroundColor = .clear
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
+    private let textView: UITextView = {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.backgroundColor = .clear
+        textView.textAlignment = .left
+        textView.font = UIFont.systemFont(ofSize: 16, weight: .regular)
+        textView.textColor = .white
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.showsVerticalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        return textView
     }()
     
     private let backgroundView: UIView = {
         let view = UIView()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.8)
-        view.layer.cornerRadius = 12
+        view.backgroundColor = UIColor.black  // 纯黑色背景
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
@@ -43,44 +46,46 @@ public class PictureInPictureTextView: UIView {
         backgroundColor = .clear
         
         addSubview(backgroundView)
-        backgroundView.addSubview(textLabel)
+        backgroundView.addSubview(textView)
         
-        // 创建约束并设置优先级以避免冲突
-        let centerXConstraint = backgroundView.centerXAnchor.constraint(equalTo: centerXAnchor)
-        let centerYConstraint = backgroundView.centerYAnchor.constraint(equalTo: centerYAnchor)
-        centerYConstraint.priority = UILayoutPriority(999) // 略低于required
-        
-        let leadingConstraint = backgroundView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 8)
-        let trailingConstraint = backgroundView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8)
-        let topConstraint = backgroundView.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 4)
-        let bottomConstraint = backgroundView.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -4)
-        
-        // 设置边距约束为低优先级，允许在小窗口中被打破
-        topConstraint.priority = UILayoutPriority(900)
-        bottomConstraint.priority = UILayoutPriority(900)
-        leadingConstraint.priority = UILayoutPriority(900)
-        trailingConstraint.priority = UILayoutPriority(900)
-        
+        // 背景视图充满整个画中画窗口
         NSLayoutConstraint.activate([
-            centerXConstraint,
-            centerYConstraint,
-            leadingConstraint,
-            trailingConstraint,
-            topConstraint,
-            bottomConstraint,
+            // 背景充满整个视图
+            backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backgroundView.topAnchor.constraint(equalTo: topAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
             
-            // Text label constraints - 使用更小的边距
-            textLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 8),
-            textLabel.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -8),
-            textLabel.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 4),
-            textLabel.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -4)
+            // 文本视图充满背景视图
+            textView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
+            textView.topAnchor.constraint(equalTo: backgroundView.topAnchor),
+            textView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor)
         ])
     }
     
     // MARK: - Public Methods
     public func updateText(_ text: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.textLabel.text = text.isEmpty ? "等待语音输入..." : text
+            guard let self = self else { return }
+            
+            let displayText = text.isEmpty ? "等待语音输入..." : text
+            self.textView.text = displayText
+            
+            // 自动滚动到底部，显示最新内容
+            if self.textView.text.count > 0 {
+                let bottom = NSMakeRange(self.textView.text.count - 1, 1)
+                self.textView.scrollRangeToVisible(bottom)
+                
+                // 或者使用另一种方式滚动到底部
+                let contentHeight = self.textView.contentSize.height
+                let textViewHeight = self.textView.frame.size.height
+                if contentHeight > textViewHeight {
+                    let bottomOffset = CGPoint(x: 0, y: contentHeight - textViewHeight)
+                    self.textView.setContentOffset(bottomOffset, animated: true)
+                }
+            }
+            
             print("📺 [PiPView] 更新文字: \(text)")
         }
     }
@@ -137,7 +142,7 @@ public class PictureInPictureManager: NSObject, ObservableObject {
         
         // 添加麦克风识别的文字
         if !microphoneText.isEmpty {
-            combinedText += "麦克风：\(microphoneText)"
+            combinedText += "【麦克风】\n\(microphoneText)"
         }
         
         // 添加媒体声音识别的文字
@@ -145,7 +150,7 @@ public class PictureInPictureManager: NSObject, ObservableObject {
             if !combinedText.isEmpty {
                 combinedText += "\n\n"
             }
-            combinedText += "媒体声音：\(mediaText)"
+            combinedText += "【媒体声音】\n\(mediaText)"
         }
         
         // 如果都为空，显示等待信息
@@ -265,8 +270,9 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     private func createVideoPlayer() {
         print("🎥 [PiP] 创建视频播放器...")
         
-        // 创建占位视频
-        guard let videoURL = VideoGenerator.createPlaceholderVideo(width: 2000, height: 400) else {
+        // 创建占位视频 - 使用固定尺寸
+        // 16:9 比例，适合画中画显示
+        guard let videoURL = VideoGenerator.createPlaceholderVideo(width: 480, height: 270) else {
             print("❌ [PiP] 占位视频创建失败")
             errorMessage = "占位视频创建失败"
             return
