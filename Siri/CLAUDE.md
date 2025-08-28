@@ -74,6 +74,8 @@ The main app and broadcast extension communicate through App Group (`group.dev.t
 - `audio_notification.json`: Audio file creation/completion events
 - `stop_command.json`: Stop broadcast command from main app
 
+**Note**: There's an inconsistency in the codebase - `ScreenBroadcastHandler` uses `group.dev.tuist.Siri2` while `Project.swift` configures `group.dev.tuist.Siri`. This may cause IPC issues.
+
 ### Permission Requirements
 The app requires these permissions (configured in Info.plist):
 - **NSMicrophoneUsageDescription**: Microphone access for speech recording

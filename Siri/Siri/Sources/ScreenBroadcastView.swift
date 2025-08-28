@@ -6,6 +6,7 @@ public struct ScreenBroadcastView: View {
     @StateObject private var broadcastManager = ScreenBroadcastManager()
     @StateObject private var realtimeAudioManager = RealtimeAudioStreamManager()
     @StateObject private var inaudibleAudioPlayer = InaudibleAudioPlayer()
+    @StateObject private var screenshotManager = ScreenshotManager()
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var selectedRecording: AudioRecording?
@@ -67,6 +68,10 @@ public struct ScreenBroadcastView: View {
             } else {
                 realtimeAudioManager.stopMonitoring()
             }
+        }
+        .onAppear {
+            // 设置截图管理器关联
+            realtimeAudioManager.screenshotManager = screenshotManager
         }
         .onReceive(realtimeAudioManager.$recognizedText) { text in
             // Update PiP with media audio recognized text
@@ -320,21 +325,108 @@ public struct ScreenBroadcastView: View {
             }
             
             ScrollView {
-                Text(realtimeAudioManager.recognizedText.isEmpty ? 
-                     "开始直播后，系统音频将自动识别为文字显示在这里..." : 
-                     realtimeAudioManager.recognizedText)
-                    .font(.body)
-                    .foregroundColor(realtimeAudioManager.recognizedText.isEmpty ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
-                    .padding(12)
-                    .background(Color(.systemBackground))
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(.systemGray4), lineWidth: 1)
-                    )
+                VStack(alignment: .leading, spacing: 12) {
+                    // 识别文字显示
+                    Text(realtimeAudioManager.recognizedText.isEmpty ? 
+                         "开始直播后，系统音频将自动识别为文字显示在这里..." : 
+                         realtimeAudioManager.recognizedText)
+                        .font(.body)
+                        .foregroundColor(realtimeAudioManager.recognizedText.isEmpty ? .secondary : .primary)
+                        .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
+                        .padding(12)
+                        .background(Color(.systemBackground))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(.systemGray4), lineWidth: 1)
+                        )
+                    
+                    // 截图显示区域
+                    if !screenshotManager.screenshots.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("📸 识别时的屏幕截图")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                
+                                if screenshotManager.getNewScreenshotsCount() > 0 {
+                                    HStack(spacing: 4) {
+                                        Circle()
+                                            .fill(Color.red)
+                                            .frame(width: 6, height: 6)
+                                        Text("\(screenshotManager.getNewScreenshotsCount())")
+                                            .font(.caption2)
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                HStack(spacing: 8) {
+                                    Text("共 \(screenshotManager.screenshots.count) 张")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    
+                                    Button("清空") {
+                                        screenshotManager.clearAllScreenshots()
+                                    }
+                                    .font(.caption2)
+                                    .foregroundColor(.red)
+                                }
+                            }
+                            
+                            // 多个截图的垂直列表
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(screenshotManager.screenshots.reversed()) { screenshot in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text(screenshot.fileName)
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                            
+                                            if screenshot.isNew {
+                                                Circle()
+                                                    .fill(Color.red)
+                                                    .frame(width: 4, height: 4)
+                                            }
+                                            
+                                            Spacer()
+                                        }
+                                        
+                                        Image(uiImage: screenshot.image)
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fit)
+                                            .frame(maxHeight: 100)
+                                            .cornerRadius(6)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 6)
+                                                    .stroke(screenshot.isNew ? Color.blue : Color(.systemGray4), lineWidth: screenshot.isNew ? 2 : 1)
+                                            )
+                                            .onTapGesture {
+                                                screenshotManager.markScreenshotAsViewed(id: screenshot.id)
+                                            }
+                                    }
+                                    .padding(6)
+                                    .background(Color(.systemBackground))
+                                    .cornerRadius(6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color(.systemGray5), lineWidth: 0.5)
+                                    )
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(Color(.systemBackground))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(.systemGray4), lineWidth: 1)
+                        )
+                    }
+                }
             }
-            .frame(maxHeight: 150)
+            .frame(maxHeight: 400) // 增加高度以容纳多个截图
         }
         .padding(16)
         .background(
@@ -518,7 +610,7 @@ class InaudibleAudioPlayer: ObservableObject {
     
     private func setupInaudibleAudio() {
         // 获取预生成的高频音频文件
-        let appGroupID = "group.dev.tuist.Siri"
+        let appGroupID = "group.dev.tuist.Siri2"
         guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
             print("❌ 无法获取App Group容器路径")
             return

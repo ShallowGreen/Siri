@@ -10,11 +10,19 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     @Published public var recognizedText: String = ""
     @Published public var errorMessage: String = ""
     
+    // 截图管理器
+    public var screenshotManager: ScreenshotManager?
+    
+    // 截图触发控制
+    private var lastScreenshotTriggerTime: TimeInterval = 0
+    private var hasTriggeredScreenshotForCurrentSession = false
+    private let screenshotCooldownInterval: TimeInterval = 10.0 // 10秒冷却时间
+    
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let logger = Logger(subsystem: "dev.tuist.Siri", category: "RealtimeAudio")
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let appGroupID = "group.dev.tuist.Siri2"
     
     private var darwinNotificationCenter: CFNotificationCenter?
     private var audioBufferQueue = [CMSampleBuffer]()
@@ -45,6 +53,10 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             errorMessage = "语音识别器不可用"
             return
         }
+        
+        // 重置截图触发状态
+        hasTriggeredScreenshotForCurrentSession = false
+        lastScreenshotTriggerTime = 0
         
         SFSpeechRecognizer.requestAuthorization { [weak self] authStatus in
             DispatchQueue.main.async {
@@ -341,8 +353,26 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
                     self?.logger.info("🎤 语音识别结果: '\(newText)' (最终结果: \(isFinal))")
                     
                     if !newText.isEmpty {
+                        let currentTime = Date().timeIntervalSince1970
+                        let timeSinceLastScreenshot = currentTime - (self?.lastScreenshotTriggerTime ?? 0)
+                        
                         self?.recognizedText = newText
                         self?.logger.info("🎯 识别文本更新: \(newText)")
+                        
+                        // 截图触发条件：
+                        // 1. 首次识别到文字（当前会话未触发过截图）
+                        // 2. 或者距离上次截图超过10秒且有新内容
+                        let shouldTriggerScreenshot = newText.count > 2 && (
+                            !(self?.hasTriggeredScreenshotForCurrentSession ?? false) ||
+                            timeSinceLastScreenshot > (self?.screenshotCooldownInterval ?? 10.0)
+                        )
+                        
+                        if shouldTriggerScreenshot {
+                            self?.screenshotManager?.triggerScreenshot(with: newText)
+                            self?.lastScreenshotTriggerTime = currentTime
+                            self?.hasTriggeredScreenshotForCurrentSession = true
+                            self?.logger.info("📸 已触发截图捕获: \(newText) (距离上次: \(String(format: "%.1f", timeSinceLastScreenshot))秒)")
+                        }
                     } else {
                         self?.logger.info("⚠️ 识别结果为空文本")
                     }

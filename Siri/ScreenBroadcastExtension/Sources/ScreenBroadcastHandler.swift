@@ -4,16 +4,23 @@ import CoreMedia
 import AVFoundation
 import AudioToolbox
 import os.log
+import UIKit
 
 @objc(ScreenBroadcastHandler)
 public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     
     private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let appGroupID = "group.dev.tuist.Siri2"
     
     // 状态管理
     private var isRecording = false
     private var audioFrameCount: Int64 = 0
+    
+    // 视频截图相关
+    private var lastScreenshotTime: TimeInterval = 0
+    private var screenshotDebounceInterval: TimeInterval = 2.0 // 2秒防抖间隔
+    private var shouldCaptureNextFrame = false
+    private var lastRecognizedText: String = ""
     
     // 音频录制
     private var audioWriter: AVAssetWriter?
@@ -85,6 +92,9 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         // 检查是否收到停止指令
         checkForStopCommand()
         
+        // 检查是否收到截图触发指令
+        checkForScreenshotTrigger()
+        
         switch sampleBufferType {
         case .audioApp:
             processAppAudio(sampleBuffer)
@@ -123,7 +133,12 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     }
     
     private func processVideo(_ sampleBuffer: CMSampleBuffer) {
-        // 处理视频数据（如果需要）
+        // 检查是否需要捕获截图
+        if shouldCaptureNextFrame {
+            captureScreenshot(from: sampleBuffer)
+            shouldCaptureNextFrame = false
+        }
+        
         logger.debug("📹 收到视频数据")
     }
     
@@ -161,6 +176,119 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
         let normalizedLevel = max(0.0, min(1.0, (decibels + 60) / 60))
         
         return normalizedLevel
+    }
+    
+    // MARK: - Video Screenshot Processing
+    
+    private func captureScreenshot(from sampleBuffer: CMSampleBuffer) {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            logger.error("❌ 无法获取视频图像缓冲区")
+            return
+        }
+        
+        // 创建CIImage
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        let context = CIContext()
+        
+        // 转换为CGImage
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            logger.error("❌ 无法创建CGImage")
+            return
+        }
+        
+        // 转换为UIImage
+        let uiImage = UIImage(cgImage: cgImage)
+        
+        // 保存截图到App Group
+        saveScreenshotToAppGroup(image: uiImage)
+        
+        logger.info("📸 视频截图已保存")
+    }
+    
+    private func saveScreenshotToAppGroup(image: UIImage) {
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            logger.error("❌ 无法获取App Group容器路径")
+            return
+        }
+        
+        // 创建截图目录
+        let screenshotDirectory = containerURL.appendingPathComponent("Screenshots")
+        if !FileManager.default.fileExists(atPath: screenshotDirectory.path) {
+            do {
+                try FileManager.default.createDirectory(at: screenshotDirectory, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                logger.error("❌ 创建截图目录失败: \(error.localizedDescription)")
+                return
+            }
+        }
+        
+        // 生成文件名
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium).replacingOccurrences(of: ":", with: "-")
+        let fileName = "Screenshot_\(timestamp).png"
+        let fileURL = screenshotDirectory.appendingPathComponent(fileName)
+        
+        // 保存图片
+        guard let imageData = image.pngData() else {
+            logger.error("❌ 无法转换图片为PNG数据")
+            return
+        }
+        
+        do {
+            try imageData.write(to: fileURL)
+            logger.info("✅ 截图已保存: \(fileName)")
+            
+            // 通知主程序有新截图
+            notifyScreenshotCaptured(fileName: fileName, fileURL: fileURL)
+            
+        } catch {
+            logger.error("❌ 保存截图失败: \(error.localizedDescription)")
+        }
+    }
+    
+    private func notifyScreenshotCaptured(fileName: String, fileURL: URL) {
+        let notification: [String: Any] = [
+            "event": "screenshot_captured",
+            "fileName": fileName,
+            "filePath": fileURL.path,
+            "timestamp": Date().timeIntervalSince1970
+        ]
+        
+        writeToAppGroup(fileName: "screenshot_notification.json", data: notification)
+    }
+    
+    private func checkForScreenshotTrigger() {
+        // 检查是否有语音识别触发截图的指令
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            return
+        }
+        
+        let triggerURL = containerURL.appendingPathComponent("screenshot_trigger.json")
+        
+        if FileManager.default.fileExists(atPath: triggerURL.path) {
+            do {
+                let data = try Data(contentsOf: triggerURL)
+                if let triggerInfo = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                   let recognizedText = triggerInfo["recognizedText"] as? String {
+                    
+                    // 检查防抖逻辑
+                    let currentTime = Date().timeIntervalSince1970
+                    if currentTime - lastScreenshotTime > screenshotDebounceInterval || 
+                       recognizedText != lastRecognizedText {
+                        
+                        shouldCaptureNextFrame = true
+                        lastScreenshotTime = currentTime
+                        lastRecognizedText = recognizedText
+                        
+                        logger.info("📸 收到截图触发指令，识别文字: \(recognizedText)")
+                    }
+                    
+                    // 删除触发文件
+                    try? FileManager.default.removeItem(at: triggerURL)
+                }
+            } catch {
+                logger.error("❌ 处理截图触发指令失败: \(error.localizedDescription)")
+            }
+        }
     }
     
     // MARK: - Communication with Main App

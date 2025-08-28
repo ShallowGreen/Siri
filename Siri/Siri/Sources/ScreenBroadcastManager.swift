@@ -17,7 +17,7 @@ public class ScreenBroadcastManager: ObservableObject {
     @Published public var currentRecordingFileName: String? = nil
     
     // MARK: - Private Properties
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let appGroupID = "group.dev.tuist.Siri2"
     private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
     private var statusCheckTimer: Timer?
     private let audioFileManager = AudioFileManager()
