@@ -3,20 +3,29 @@ import AVFoundation
 import MediaPlayer
 
 public struct ScreenBroadcastView: View {
-    @StateObject private var broadcastManager = ScreenBroadcastManager()
-    @StateObject private var realtimeAudioManager = RealtimeAudioStreamManager()
-    @StateObject private var inaudibleAudioPlayer = InaudibleAudioPlayer()
+    @ObservedObject var broadcastManager: ScreenBroadcastManager
+    @ObservedObject var realtimeAudioManager: RealtimeAudioStreamManager
+    @ObservedObject var inaudibleAudioPlayer: InaudibleAudioPlayer
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var selectedRecording: AudioRecording?
     @State private var showingPlayer = false
     @State private var showingShareSheet = false
     @State private var recordingToShare: AudioRecording?
+    @State private var showingClearAllAlert = false
     
     let pipManager: PictureInPictureManager?
     
-    public init(pipManager: PictureInPictureManager? = nil) {
+    init(
+        pipManager: PictureInPictureManager? = nil,
+        broadcastManager: ScreenBroadcastManager,
+        realtimeAudioManager: RealtimeAudioStreamManager,
+        inaudibleAudioPlayer: InaudibleAudioPlayer
+    ) {
         self.pipManager = pipManager
+        self.broadcastManager = broadcastManager
+        self.realtimeAudioManager = realtimeAudioManager
+        self.inaudibleAudioPlayer = inaudibleAudioPlayer
     }
     
     public var body: some View {
@@ -76,6 +85,14 @@ public struct ScreenBroadcastView: View {
             Button("确定") { }
         } message: {
             Text(alertMessage)
+        }
+        .alert("清空所有录音", isPresented: $showingClearAllAlert) {
+            Button("取消", role: .cancel) { }
+            Button("清空", role: .destructive) {
+                clearAllRecordings()
+            }
+        } message: {
+            Text("确定要删除所有录音文件吗？此操作不可撤销。")
         }
         .sheet(isPresented: $showingPlayer) {
             if let recording = selectedRecording {
@@ -352,6 +369,16 @@ public struct ScreenBroadcastView: View {
                 
                 Spacer()
                 
+                // 清空所有录音按钮
+                Button(action: {
+                    showingClearAllAlert = true
+                }) {
+                    Image(systemName: "trash.fill")
+                        .foregroundColor(.red)
+                }
+                .disabled(broadcastManager.audioRecordings.isEmpty)
+                
+                // 刷新按钮
                 Button(action: {
                     broadcastManager.loadAudioRecordings()
                 }) {
@@ -385,6 +412,19 @@ public struct ScreenBroadcastView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.systemGray6))
         )
+    }
+    
+    // MARK: - Clear All Recordings
+    private func clearAllRecordings() {
+        // 删除所有录音文件
+        broadcastManager.clearAllRecordings()
+        
+        // 重新加载录音列表
+        broadcastManager.loadAudioRecordings()
+        
+        // 显示成功提示
+        alertMessage = "已清空所有录音文件"
+        showingAlert = true
     }
 }
 
@@ -677,5 +717,9 @@ class InaudibleAudioPlayer: ObservableObject {
 }
 
 #Preview {
-    ScreenBroadcastView()
+    ScreenBroadcastView(
+        broadcastManager: ScreenBroadcastManager(),
+        realtimeAudioManager: RealtimeAudioStreamManager(),
+        inaudibleAudioPlayer: InaudibleAudioPlayer()
+    )
 }

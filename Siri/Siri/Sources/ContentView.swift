@@ -28,11 +28,15 @@ public struct ContentView: View {
     // MARK: - State Objects
     @StateObject private var speechManager = SpeechRecognitionManager()
     @StateObject private var pipManager = PictureInPictureManager()
+    @StateObject private var broadcastManager = ScreenBroadcastManager()
+    @StateObject private var realtimeAudioManager = RealtimeAudioStreamManager()
+    @StateObject private var inaudibleAudioPlayer = InaudibleAudioPlayer()
     
     // MARK: - State Variables
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var playerLayerContainer: UIView?
+    @State private var isPushToTalkActive = false
     
     public init() {}
 
@@ -46,11 +50,16 @@ public struct ContentView: View {
                 }
             
             // 屏幕直播 Tab
-            ScreenBroadcastView(pipManager: pipManager)
-                .tabItem {
-                    Image(systemName: "tv")
-                    Text("屏幕直播")
-                }
+            ScreenBroadcastView(
+                pipManager: pipManager,
+                broadcastManager: broadcastManager,
+                realtimeAudioManager: realtimeAudioManager,
+                inaudibleAudioPlayer: inaudibleAudioPlayer
+            )
+            .tabItem {
+                Image(systemName: "tv")
+                Text("屏幕直播")
+            }
         }
         .onAppear {
             speechManager.requestAuthorization()
@@ -178,6 +187,38 @@ public struct ContentView: View {
                 }
                 .disabled(!speechManager.isAuthorized && !speechManager.isRecording)
                 
+                // Push-to-Talk Button
+                Button(action: {}) {
+                    HStack {
+                        Image(systemName: isPushToTalkActive ? "mic.fill" : "hand.point.up.left.fill")
+                            .font(.title2)
+                        Text(isPushToTalkActive ? "按住说话中..." : "按住说话")
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 15)
+                    .background(isPushToTalkActive ? Color.red : Color.purple)
+                    .cornerRadius(25)
+                    .scaleEffect(isPushToTalkActive ? 1.1 : 1.0)
+                    .animation(.easeInOut(duration: 0.1), value: isPushToTalkActive)
+                }
+                .disabled(!speechManager.isAuthorized)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            if !isPushToTalkActive {
+                                handlePushToTalkPress()
+                            }
+                        }
+                        .onEnded { _ in
+                            if isPushToTalkActive {
+                                handlePushToTalkRelease()
+                            }
+                        }
+                )
+                
                 // Picture in Picture Toggle Button
                 Button(action: {
                     print("🔘 [UI] 画中画按钮被点击")
@@ -226,6 +267,71 @@ public struct ContentView: View {
                 alertMessage = error
                 showingAlert = true
             }
+        }
+        .onReceive(realtimeAudioManager.$recognizedText) { text in
+            // Update PiP with media audio recognized text (only when not in push-to-talk mode)
+            if !isPushToTalkActive {
+                pipManager.updateMediaText(text)
+            }
+        }
+    }
+    
+    // MARK: - Push-to-Talk Handlers
+    private func handlePushToTalkPress() {
+        guard speechManager.isAuthorized else { return }
+        
+        print("🎤 [PTT] 按下按住说话按钮")
+        isPushToTalkActive = true
+        
+        // 1. 中断后台音乐
+        print("🎵 [PTT] 中断后台音乐")
+        inaudibleAudioPlayer.playInaudibleSound()
+        
+        // 2. 检查是否在屏幕直播
+        let isBroadcasting = broadcastManager.isRecording
+        print("📡 [PTT] 屏幕直播状态: \(isBroadcasting)")
+        
+        // 3. 如果在屏幕直播，暂停媒体声音识别
+        if isBroadcasting {
+            print("⏸️ [PTT] 暂停媒体声音识别前，启用文字保留模式")
+            realtimeAudioManager.setTextPreservationMode(true)
+            realtimeAudioManager.stopMonitoring()
+        }
+        
+        // 4. 启用麦克风收集和语音识别
+        print("🎤 [PTT] 启动麦克风语音识别")
+        speechManager.startRecording(clearPreviousText: false)
+        
+        // Auto-start PiP when recording starts
+        if pipManager.canStartPip && !pipManager.isPipActive {
+            pipManager.startPictureInPicture()
+        }
+    }
+    
+    private func handlePushToTalkRelease() {
+        guard isPushToTalkActive else { return }
+        
+        print("🎤 [PTT] 松开按住说话按钮")
+        isPushToTalkActive = false
+        
+        // 1. 停止麦克风收集和识别
+        print("🛑 [PTT] 停止麦克风语音识别")
+        speechManager.stopRecording()
+        
+        // 2. 检查是否在屏幕直播
+        let isBroadcasting = broadcastManager.isRecording
+        print("📡 [PTT] 屏幕直播状态: \(isBroadcasting)")
+        
+        // 3. 恢复媒体声音语音识别
+        if isBroadcasting {
+            print("▶️ [PTT] 恢复媒体声音识别，保留之前的文字")
+            realtimeAudioManager.startMonitoring()
+        }
+        
+        // 4. 如果在屏幕直播，使用远程命令恢复后台音乐
+        if isBroadcasting {
+            print("🎵 [PTT] 使用远程命令恢复后台音乐")
+            inaudibleAudioPlayer.resumeBackgroundMusicViaRemoteCommand()
         }
     }
 }

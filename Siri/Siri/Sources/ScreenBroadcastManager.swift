@@ -324,6 +324,12 @@ public class ScreenBroadcastManager: ObservableObject {
         }
     }
     
+    public func clearAllRecordings() {
+        logger.info("🗑️ 清空所有录音文件")
+        audioFileManager.clearAllRecordings()
+        loadAudioRecordings()
+    }
+    
     public func convertRecordingToWAV(_ recording: AudioRecording) {
         // 只对M4A文件进行转换
         guard recording.fileName.hasSuffix(".m4a") else {

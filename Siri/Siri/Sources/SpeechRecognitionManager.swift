@@ -12,6 +12,10 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
     @Published public var isAuthorized: Bool = false
     @Published public var errorMessage: String = ""
     
+    // MARK: - Private Properties for text management
+    private var previousText: String = ""
+    private var appendToExistingText: Bool = false
+    
     // MARK: - Private Properties
     private var audioEngine = AVAudioEngine()
     private var speechRecognizer: SFSpeechRecognizer?
@@ -62,7 +66,7 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
     }
     
     // MARK: - Recording Control
-    public func startRecording() {
+    public func startRecording(clearPreviousText: Bool = true) {
         guard isAuthorized else {
             requestAuthorization()
             return
@@ -71,7 +75,7 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
         guard !isRecording else { return }
         
         do {
-            try startSpeechRecognition()
+            try startSpeechRecognition(clearPreviousText: clearPreviousText)
         } catch {
             self.errorMessage = "Failed to start recording: \(error.localizedDescription)"
         }
@@ -103,7 +107,7 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
     }
     
     // MARK: - Speech Recognition Implementation
-    private func startSpeechRecognition() throws {
+    private func startSpeechRecognition(clearPreviousText: Bool = true) throws {
         // Cancel any previous task
         recognitionTask?.cancel()
         recognitionTask = nil
@@ -132,7 +136,20 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
         recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { [weak self] result, error in
             DispatchQueue.main.async {
                 if let result = result {
-                    self?.recognizedText = result.bestTranscription.formattedString
+                    let newText = result.bestTranscription.formattedString
+                    if self?.appendToExistingText == true, let previousText = self?.previousText {
+                        // 追加模式：保留之前的文字，添加新内容
+                        if !previousText.isEmpty && !newText.isEmpty {
+                            self?.recognizedText = previousText + "\n" + newText
+                        } else if !newText.isEmpty {
+                            self?.recognizedText = newText
+                        } else {
+                            self?.recognizedText = previousText
+                        }
+                    } else {
+                        // 替换模式：直接使用新文字
+                        self?.recognizedText = newText
+                    }
                 }
                 
                 if let error = error {
@@ -153,7 +170,15 @@ public class SpeechRecognitionManager: NSObject, ObservableObject {
         try audioEngine.start()
         
         isRecording = true
-        recognizedText = ""
+        if clearPreviousText {
+            recognizedText = ""
+            previousText = ""
+            appendToExistingText = false
+        } else {
+            // 保存当前文字作为前缀，新识别的文字将追加
+            previousText = recognizedText
+            appendToExistingText = true
+        }
         errorMessage = ""
     }
 }

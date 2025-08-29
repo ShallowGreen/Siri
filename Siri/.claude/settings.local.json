@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tuist generate:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(swift build:*)",
+      "Bash(timeout 120 xcodebuild:*)",
+      "Bash(echo \"Exit code: $?\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

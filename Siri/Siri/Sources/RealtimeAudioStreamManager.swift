@@ -10,6 +10,10 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     @Published public var recognizedText: String = ""
     @Published public var errorMessage: String = ""
     
+    // MARK: - Private Properties for text management
+    private var previousText: String = ""
+    private var shouldPreserveText: Bool = false
+    
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -67,6 +71,24 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     public func stopMonitoring() {
         logger.info("🛑 停止实时音频流监控")
         stopRecognition()
+    }
+    
+    // MARK: - Text Preservation Methods
+    private var textPreservationRequested: Bool = false  // 跟踪是否请求了文字保留
+    
+    public func setTextPreservationMode(_ preserve: Bool) {
+        textPreservationRequested = preserve
+        shouldPreserveText = preserve
+        if preserve {
+            // 保存当前文字
+            previousText = recognizedText
+            logger.info("🔒 启用文字保留模式，保存文字: '\(self.previousText)'")
+        } else {
+            // 清除保存的文字
+            previousText = ""
+            textPreservationRequested = false
+            logger.info("🔓 禁用文字保留模式")
+        }
     }
     
     private func setupDarwinNotifications() {
@@ -302,6 +324,12 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             return
         }
         
+        // 如果之前请求了文字保留模式，重新启用
+        if textPreservationRequested {
+            shouldPreserveText = true
+            logger.info("🔄 恢复文字保留模式，之前保存的文字: '\(self.previousText)'")
+        }
+        
         // 确保音频从扬声器输出
         do {
             try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
@@ -341,8 +369,20 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
                     self?.logger.info("🎤 语音识别结果: '\(newText)' (最终结果: \(isFinal))")
                     
                     if !newText.isEmpty {
-                        self?.recognizedText = newText
-                        self?.logger.info("🎯 识别文本更新: \(newText)")
+                        if self?.shouldPreserveText == true, let previousText = self?.previousText {
+                            // 追加模式：保留之前的文字，添加新内容
+                            if !previousText.isEmpty {
+                                self?.recognizedText = previousText + "\n" + newText
+                                self?.logger.info("🎯 识别文本追加: '\(previousText)' + '\(newText)'")
+                            } else {
+                                self?.recognizedText = newText
+                                self?.logger.info("🎯 识别文本更新: \(newText)")
+                            }
+                        } else {
+                            // 替换模式：直接使用新文字
+                            self?.recognizedText = newText
+                            self?.logger.info("🎯 识别文本更新: \(newText)")
+                        }
                     } else {
                         self?.logger.info("⚠️ 识别结果为空文本")
                     }
@@ -381,6 +421,12 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         recognitionRequest = nil
         recognitionTask = nil
         isProcessing = false
+        
+        // 停止识别时暂时禁用文字保留模式，防止延迟回调导致文字重复
+        if shouldPreserveText {
+            logger.info("⏸️ 停止识别时暂时禁用文字保留模式")
+            shouldPreserveText = false
+        }
         
         // 停止m4a文件录制 - 模仿ScreenBroadcastHandler的stopAudioRecording
         stopM4ARecording()

@@ -8,26 +8,81 @@ import AVFoundation
 public class PictureInPictureTextView: UIView {
     
     // MARK: - UI Components
-    private let textView: UITextView = {
-        let textView = UITextView()
-        textView.isEditable = false
-        textView.isSelectable = false
-        textView.backgroundColor = .clear
-        textView.textAlignment = .left
-        textView.font = UIFont.systemFont(ofSize: 16, weight: .regular)
-        textView.textColor = .white
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        textView.showsVerticalScrollIndicator = false
-        textView.showsHorizontalScrollIndicator = false
-        textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
-        return textView
-    }()
-    
     private let backgroundView: UIView = {
         let view = UIView()
         view.backgroundColor = UIColor.black  // 纯黑色背景
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
+    }()
+    
+    // 上半部分：麦克风识别
+    private let microphoneContainerView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+    
+    private let microphoneLabel: UILabel = {
+        let label = UILabel()
+        label.text = "麦克风"
+        label.font = UIFont.systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+    
+    private let microphoneTextView: UITextView = {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.backgroundColor = .clear
+        textView.textAlignment = .left
+        textView.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        textView.textColor = .white
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.showsVerticalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = UIEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
+        return textView
+    }()
+    
+    // 分割线
+    private let dividerView: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor.gray
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+    
+    // 下半部分：媒体声音识别
+    private let mediaContainerView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+    
+    private let mediaLabel: UILabel = {
+        let label = UILabel()
+        label.text = "媒体声音"
+        label.font = UIFont.systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+    
+    private let mediaTextView: UITextView = {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = false
+        textView.backgroundColor = .clear
+        textView.textAlignment = .left
+        textView.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        textView.textColor = .white
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.showsVerticalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = UIEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
+        return textView
     }()
     
     // MARK: - Initialization
@@ -45,48 +100,117 @@ public class PictureInPictureTextView: UIView {
     private func setupUI() {
         backgroundColor = .clear
         
+        // 添加背景视图
         addSubview(backgroundView)
-        backgroundView.addSubview(textView)
         
-        // 背景视图充满整个画中画窗口
+        // 添加容器视图和分割线
+        backgroundView.addSubview(microphoneContainerView)
+        backgroundView.addSubview(dividerView)
+        backgroundView.addSubview(mediaContainerView)
+        
+        // 在麦克风容器中添加标签和文本视图
+        microphoneContainerView.addSubview(microphoneLabel)
+        microphoneContainerView.addSubview(microphoneTextView)
+        
+        // 在媒体容器中添加标签和文本视图
+        mediaContainerView.addSubview(mediaLabel)
+        mediaContainerView.addSubview(mediaTextView)
+        
+        // 设置约束
         NSLayoutConstraint.activate([
-            // 背景充满整个视图
+            // 背景视图充满整个画中画窗口
             backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
             backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
             backgroundView.topAnchor.constraint(equalTo: topAnchor),
             backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
             
-            // 文本视图充满背景视图
-            textView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor),
-            textView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
-            textView.topAnchor.constraint(equalTo: backgroundView.topAnchor),
-            textView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor)
+            // 麦克风容器 - 上半部分
+            microphoneContainerView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor),
+            microphoneContainerView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
+            microphoneContainerView.topAnchor.constraint(equalTo: backgroundView.topAnchor),
+            microphoneContainerView.bottomAnchor.constraint(equalTo: dividerView.topAnchor),
+            
+            // 分割线
+            dividerView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 8),
+            dividerView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -8),
+            dividerView.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
+            dividerView.heightAnchor.constraint(equalToConstant: 1),
+            
+            // 媒体容器 - 下半部分
+            mediaContainerView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor),
+            mediaContainerView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
+            mediaContainerView.topAnchor.constraint(equalTo: dividerView.bottomAnchor),
+            mediaContainerView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor),
+            
+            // 麦克风标签
+            microphoneLabel.leadingAnchor.constraint(equalTo: microphoneContainerView.leadingAnchor, constant: 8),
+            microphoneLabel.trailingAnchor.constraint(equalTo: microphoneContainerView.trailingAnchor, constant: -8),
+            microphoneLabel.topAnchor.constraint(equalTo: microphoneContainerView.topAnchor, constant: 4),
+            microphoneLabel.heightAnchor.constraint(equalToConstant: 16),
+            
+            // 麦克风文本视图
+            microphoneTextView.leadingAnchor.constraint(equalTo: microphoneContainerView.leadingAnchor, constant: 4),
+            microphoneTextView.trailingAnchor.constraint(equalTo: microphoneContainerView.trailingAnchor, constant: -4),
+            microphoneTextView.topAnchor.constraint(equalTo: microphoneLabel.bottomAnchor, constant: 2),
+            microphoneTextView.bottomAnchor.constraint(equalTo: microphoneContainerView.bottomAnchor, constant: -4),
+            
+            // 媒体标签
+            mediaLabel.leadingAnchor.constraint(equalTo: mediaContainerView.leadingAnchor, constant: 8),
+            mediaLabel.trailingAnchor.constraint(equalTo: mediaContainerView.trailingAnchor, constant: -8),
+            mediaLabel.topAnchor.constraint(equalTo: mediaContainerView.topAnchor, constant: 4),
+            mediaLabel.heightAnchor.constraint(equalToConstant: 16),
+            
+            // 媒体文本视图
+            mediaTextView.leadingAnchor.constraint(equalTo: mediaContainerView.leadingAnchor, constant: 4),
+            mediaTextView.trailingAnchor.constraint(equalTo: mediaContainerView.trailingAnchor, constant: -4),
+            mediaTextView.topAnchor.constraint(equalTo: mediaLabel.bottomAnchor, constant: 2),
+            mediaTextView.bottomAnchor.constraint(equalTo: mediaContainerView.bottomAnchor, constant: -4)
         ])
     }
     
     // MARK: - Public Methods
-    public func updateText(_ text: String) {
+    public func updateMicrophoneText(_ text: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
             let displayText = text.isEmpty ? "等待语音输入..." : text
-            self.textView.text = displayText
+            self.microphoneTextView.text = displayText
             
             // 自动滚动到底部，显示最新内容
-            if self.textView.text.count > 0 {
-                let bottom = NSMakeRange(self.textView.text.count - 1, 1)
-                self.textView.scrollRangeToVisible(bottom)
-                
-                // 或者使用另一种方式滚动到底部
-                let contentHeight = self.textView.contentSize.height
-                let textViewHeight = self.textView.frame.size.height
+            self.scrollToBottom(textView: self.microphoneTextView)
+            
+            print("📺 [PiPView] 更新麦克风文字: \(text)")
+        }
+    }
+    
+    public func updateMediaText(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            let displayText = text.isEmpty ? "等待媒体声音..." : text
+            self.mediaTextView.text = displayText
+            
+            // 自动滚动到底部，显示最新内容
+            self.scrollToBottom(textView: self.mediaTextView)
+            
+            print("📺 [PiPView] 更新媒体文字: \(text)")
+        }
+    }
+    
+    private func scrollToBottom(textView: UITextView) {
+        if textView.text.count > 0 {
+            let bottom = NSMakeRange(textView.text.count - 1, 1)
+            textView.scrollRangeToVisible(bottom)
+            
+            // 备用滚动方法
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                let contentHeight = textView.contentSize.height
+                let textViewHeight = textView.frame.size.height
                 if contentHeight > textViewHeight {
                     let bottomOffset = CGPoint(x: 0, y: contentHeight - textViewHeight)
-                    self.textView.setContentOffset(bottomOffset, animated: true)
+                    textView.setContentOffset(bottomOffset, animated: true)
                 }
             }
-            
-            print("📺 [PiPView] 更新文字: \(text)")
         }
     }
 }
@@ -121,47 +245,20 @@ public class PictureInPictureManager: NSObject, ObservableObject {
     // MARK: - Public Methods
     public func updateText(_ text: String) {
         recognizedText = text
-        updateCombinedText()
+        pipTextView?.updateMicrophoneText(text)
         print("📝 [PiP] 更新识别文字: \(text)")
     }
     
     public func updateMicrophoneText(_ text: String) {
         microphoneText = text
-        updateCombinedText()
+        pipTextView?.updateMicrophoneText(text)
         print("🎤 [PiP] 更新麦克风文字: \(text)")
     }
     
     public func updateMediaText(_ text: String) {
         mediaText = text
-        updateCombinedText()
+        pipTextView?.updateMediaText(text)
         print("📺 [PiP] 更新媒体声音文字: \(text)")
-    }
-    
-    private func updateCombinedText() {
-        var combinedText = ""
-        
-        // 添加麦克风识别的文字
-        if !microphoneText.isEmpty {
-            combinedText += "【麦克风】\n\(microphoneText)"
-        }
-        
-        // 添加媒体声音识别的文字
-        if !mediaText.isEmpty {
-            if !combinedText.isEmpty {
-                combinedText += "\n\n"
-            }
-            combinedText += "【媒体声音】\n\(mediaText)"
-        }
-        
-        // 如果都为空，显示等待信息
-        if combinedText.isEmpty {
-            combinedText = "等待语音输入..."
-        }
-        
-        // 更新显示的文字
-        recognizedText = combinedText
-        pipTextView?.updateText(combinedText)
-        print("🔄 [PiP] 更新组合文字: \(combinedText)")
     }
     
     public func startPictureInPicture() {
@@ -516,7 +613,10 @@ public class PictureInPictureManager: NSObject, ObservableObject {
         
         pipTextView = PictureInPictureTextView()
         pipTextView?.translatesAutoresizingMaskIntoConstraints = false
-        pipTextView?.updateText(recognizedText)
+        
+        // 初始化显示当前的文字内容
+        pipTextView?.updateMicrophoneText(microphoneText)
+        pipTextView?.updateMediaText(mediaText)
         
         pipWindow.addSubview(pipTextView!)
         
