@@ -14,9 +14,10 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     public var screenshotManager: ScreenshotManager?
     
     // 截图触发控制
+    private var lastRecognizedText: String = ""
+    private var lastTextChangeTime: TimeInterval = 0
     private var lastScreenshotTriggerTime: TimeInterval = 0
-    private var hasTriggeredScreenshotForCurrentSession = false
-    private let screenshotCooldownInterval: TimeInterval = 10.0 // 10秒冷却时间
+    private let textUnchangedThreshold: TimeInterval = 10.0 // 文字内容10秒未变化的阈值
     
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -55,7 +56,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         }
         
         // 重置截图触发状态
-        hasTriggeredScreenshotForCurrentSession = false
+        lastRecognizedText = ""
+        lastTextChangeTime = 0
         lastScreenshotTriggerTime = 0
         
         SFSpeechRecognizer.requestAuthorization { [weak self] authStatus in
@@ -354,24 +356,26 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
                     
                     if !newText.isEmpty {
                         let currentTime = Date().timeIntervalSince1970
-                        let timeSinceLastScreenshot = currentTime - (self?.lastScreenshotTriggerTime ?? 0)
                         
                         self?.recognizedText = newText
                         self?.logger.info("🎯 识别文本更新: \(newText)")
                         
-                        // 截图触发条件：
-                        // 1. 首次识别到文字（当前会话未触发过截图）
-                        // 2. 或者距离上次截图超过10秒且有新内容
-                        let shouldTriggerScreenshot = newText.count > 2 && (
-                            !(self?.hasTriggeredScreenshotForCurrentSession ?? false) ||
-                            timeSinceLastScreenshot > (self?.screenshotCooldownInterval ?? 10.0)
-                        )
+                        // 计算新增文字长度
+                        let newTextLength = newText.count - (self?.lastRecognizedText.count ?? 0)
                         
-                        if shouldTriggerScreenshot {
-                            self?.screenshotManager?.triggerScreenshot(with: newText)
+                        
+                        // 截图触发条件：
+                        // 1. 新增文字大于3个字符
+                        // 2. 距离上次截图已经超过10秒
+                        if newTextLength > 3 {
+                            self?.lastRecognizedText = newText
+                            let timeSinceLastScreenshot = currentTime - (self?.lastScreenshotTriggerTime ?? 0)
+                            let shouldTriggerScreenshot = timeSinceLastScreenshot > (self?.textUnchangedThreshold ?? 10.0)
+                            if shouldTriggerScreenshot {
+                                self?.screenshotManager?.triggerScreenshot(with: newText)
+                                self?.logger.info("📸 已触发截图捕获: \(newText) (新增文字: \(newTextLength), 距离上次截图: \(String(format: "%.1f", timeSinceLastScreenshot))秒)")
+                            }
                             self?.lastScreenshotTriggerTime = currentTime
-                            self?.hasTriggeredScreenshotForCurrentSession = true
-                            self?.logger.info("📸 已触发截图捕获: \(newText) (距离上次: \(String(format: "%.1f", timeSinceLastScreenshot))秒)")
                         }
                     } else {
                         self?.logger.info("⚠️ 识别结果为空文本")
