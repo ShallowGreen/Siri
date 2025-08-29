@@ -4,6 +4,36 @@ import UIKit
 import SwiftUI
 import AVFoundation
 
+// MARK: - Helper Functions for Animations
+private func createPulseImages() -> [UIImage] {
+    var images: [UIImage] = []
+    let size = CGSize(width: 16, height: 16)
+    
+    // 创建不同透明度的圆形图像来模拟脉冲效果
+    for i in 0...10 {
+        let alpha = CGFloat(0.3 + Double(i) * 0.07) // 从0.3到1.0
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.systemGreen.withAlphaComponent(alpha).cgColor)
+            context.cgContext.fillEllipse(in: CGRect(origin: .zero, size: size))
+        }
+        images.append(image)
+    }
+    
+    // 反向添加，创建来回脉冲效果
+    for i in (0...9).reversed() {
+        let alpha = CGFloat(0.3 + Double(i) * 0.07)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.systemGreen.withAlphaComponent(alpha).cgColor)
+            context.cgContext.fillEllipse(in: CGRect(origin: .zero, size: size))
+        }
+        images.append(image)
+    }
+    
+    return images
+}
+
 // MARK: - Picture in Picture Text Overlay View
 public class PictureInPictureTextView: UIView {
     
@@ -29,6 +59,22 @@ public class PictureInPictureTextView: UIView {
         label.textColor = .white
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
+    }()
+    
+    // 麦克风动画图标
+    private let microphoneAnimationView: UIImageView = {
+        let imageView = UIImageView()
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentMode = .scaleAspectFit
+        
+        // 创建简单的脉冲动画图标
+        let pulseImages = createPulseImages()
+        imageView.animationImages = pulseImages
+        imageView.animationDuration = 1.0
+        imageView.animationRepeatCount = 0 // 无限循环
+        imageView.startAnimating()
+        
+        return imageView
     }()
     
     private let microphoneTextView: UITextView = {
@@ -70,6 +116,15 @@ public class PictureInPictureTextView: UIView {
         return label
     }()
     
+    // 媒体声音动画视图
+    private let mediaAnimationView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .systemBlue
+        view.layer.cornerRadius = 6
+        return view
+    }()
+    
     private let mediaTextView: UITextView = {
         let textView = UITextView()
         textView.isEditable = false
@@ -108,12 +163,14 @@ public class PictureInPictureTextView: UIView {
         backgroundView.addSubview(dividerView)
         backgroundView.addSubview(mediaContainerView)
         
-        // 在麦克风容器中添加标签和文本视图
+        // 在麦克风容器中添加标签、动画和文本视图
         microphoneContainerView.addSubview(microphoneLabel)
+        microphoneContainerView.addSubview(microphoneAnimationView)
         microphoneContainerView.addSubview(microphoneTextView)
         
-        // 在媒体容器中添加标签和文本视图
+        // 在媒体容器中添加标签、动画和文本视图
         mediaContainerView.addSubview(mediaLabel)
+        mediaContainerView.addSubview(mediaAnimationView)
         mediaContainerView.addSubview(mediaTextView)
         
         // 设置约束
@@ -144,9 +201,15 @@ public class PictureInPictureTextView: UIView {
             
             // 麦克风标签
             microphoneLabel.leadingAnchor.constraint(equalTo: microphoneContainerView.leadingAnchor, constant: 8),
-            microphoneLabel.trailingAnchor.constraint(equalTo: microphoneContainerView.trailingAnchor, constant: -8),
             microphoneLabel.topAnchor.constraint(equalTo: microphoneContainerView.topAnchor, constant: 4),
             microphoneLabel.heightAnchor.constraint(equalToConstant: 16),
+            
+            // 麦克风动画视图（在标签右侧）
+            microphoneAnimationView.leadingAnchor.constraint(equalTo: microphoneLabel.trailingAnchor, constant: 4),
+            microphoneAnimationView.centerYAnchor.constraint(equalTo: microphoneLabel.centerYAnchor),
+            microphoneAnimationView.widthAnchor.constraint(equalToConstant: 16),
+            microphoneAnimationView.heightAnchor.constraint(equalToConstant: 16),
+            microphoneAnimationView.trailingAnchor.constraint(lessThanOrEqualTo: microphoneContainerView.trailingAnchor, constant: -8),
             
             // 麦克风文本视图
             microphoneTextView.leadingAnchor.constraint(equalTo: microphoneContainerView.leadingAnchor, constant: 4),
@@ -156,9 +219,15 @@ public class PictureInPictureTextView: UIView {
             
             // 媒体标签
             mediaLabel.leadingAnchor.constraint(equalTo: mediaContainerView.leadingAnchor, constant: 8),
-            mediaLabel.trailingAnchor.constraint(equalTo: mediaContainerView.trailingAnchor, constant: -8),
             mediaLabel.topAnchor.constraint(equalTo: mediaContainerView.topAnchor, constant: 4),
             mediaLabel.heightAnchor.constraint(equalToConstant: 16),
+            
+            // 媒体动画视图（在标签右侧）
+            mediaAnimationView.leadingAnchor.constraint(equalTo: mediaLabel.trailingAnchor, constant: 4),
+            mediaAnimationView.centerYAnchor.constraint(equalTo: mediaLabel.centerYAnchor),
+            mediaAnimationView.widthAnchor.constraint(equalToConstant: 12),
+            mediaAnimationView.heightAnchor.constraint(equalToConstant: 12),
+            mediaAnimationView.trailingAnchor.constraint(lessThanOrEqualTo: mediaContainerView.trailingAnchor, constant: -8),
             
             // 媒体文本视图
             mediaTextView.leadingAnchor.constraint(equalTo: mediaContainerView.leadingAnchor, constant: 4),
@@ -166,6 +235,34 @@ public class PictureInPictureTextView: UIView {
             mediaTextView.topAnchor.constraint(equalTo: mediaLabel.bottomAnchor, constant: 2),
             mediaTextView.bottomAnchor.constraint(equalTo: mediaContainerView.bottomAnchor, constant: -4)
         ])
+        
+        // 启动媒体声音的旋转动画
+        startMediaAnimation()
+    }
+    
+    private func startMediaAnimation() {
+        // 创建旋转动画
+        let rotationAnimation = CABasicAnimation(keyPath: "transform.rotation")
+        rotationAnimation.fromValue = 0
+        rotationAnimation.toValue = Double.pi * 2
+        rotationAnimation.duration = 2.0
+        rotationAnimation.repeatCount = .infinity
+        
+        // 创建缩放动画
+        let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
+        scaleAnimation.fromValue = 0.8
+        scaleAnimation.toValue = 1.2
+        scaleAnimation.duration = 1.0
+        scaleAnimation.autoreverses = true
+        scaleAnimation.repeatCount = .infinity
+        
+        // 组合动画
+        let groupAnimation = CAAnimationGroup()
+        groupAnimation.animations = [rotationAnimation, scaleAnimation]
+        groupAnimation.duration = 2.0
+        groupAnimation.repeatCount = .infinity
+        
+        mediaAnimationView.layer.add(groupAnimation, forKey: "mediaAnimation")
     }
     
     // MARK: - Public Methods
