@@ -284,8 +284,8 @@ public struct ContentView: View {
         isPushToTalkActive = true
         
         // 1. 中断后台音乐
-        print("🎵 [PTT] 中断后台音乐")
-        inaudibleAudioPlayer.playInaudibleSound()
+        // print("🎵 [PTT] 中断后台音乐")
+        // inaudibleAudioPlayer.playInaudibleSound()
         
         // 2. 检查是否在屏幕直播
         let isBroadcasting = broadcastManager.isRecording
@@ -329,10 +329,10 @@ public struct ContentView: View {
         }
         
         // 4. 如果在屏幕直播，使用远程命令恢复后台音乐
-        if isBroadcasting {
-            print("🎵 [PTT] 使用远程命令恢复后台音乐")
-            inaudibleAudioPlayer.resumeBackgroundMusicViaRemoteCommand()
-        }
+        // if isBroadcasting {
+        //     print("🎵 [PTT] 使用远程命令恢复后台音乐")
+        //     inaudibleAudioPlayer.resumeBackgroundMusicViaRemoteCommand()
+        // }
     }
 }
 
