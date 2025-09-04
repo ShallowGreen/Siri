@@ -11,7 +11,8 @@
       "Read(//Users/zhaoyao/Library/Developer/Xcode/DerivedData/**)",
       "Bash(curl:*)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//Users/zhaoyao/Documents/ID/demos/**)"
     ],
     "deny": [],
     "ask": []

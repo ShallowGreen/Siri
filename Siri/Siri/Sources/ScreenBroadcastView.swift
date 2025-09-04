@@ -71,9 +71,12 @@ public struct ScreenBroadcastView: View {
             }
         }
         .onReceive(broadcastManager.$isRecording) { isRecording in
+            // 当开始直播时连接socket，停止直播时断开socket
             if isRecording {
+                print("📡 [ScreenBroadcast] 开始屏幕直播，连接Socket并启动语音识别")
                 realtimeAudioManager.startMonitoring()
             } else {
+                print("🛑 [ScreenBroadcast] 停止屏幕直播，断开Socket连接")
                 realtimeAudioManager.stopMonitoring()
             }
         }

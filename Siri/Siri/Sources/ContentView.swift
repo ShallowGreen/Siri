@@ -291,8 +291,12 @@ public struct ContentView: View {
         let isBroadcasting = broadcastManager.isRecording
         print("📡 [PTT] 屏幕直播状态: \(isBroadcasting)")
         
-        // 3. 如果在屏幕直播，暂停媒体声音识别
-        if isBroadcasting {
+        // 3. 如果没有在屏幕直播，先连接socket再启动语音识别
+        if !isBroadcasting {
+            print("🔌 [PTT] 没有屏幕直播，启动socket连接和语音识别")
+            realtimeAudioManager.startMonitoring()
+        } else {
+            // 如果在屏幕直播，暂停媒体声音识别
             print("⏸️ [PTT] 暂停媒体声音识别前，启用文字保留模式")
             realtimeAudioManager.setTextPreservationMode(true)
             realtimeAudioManager.stopMonitoring()
@@ -322,10 +326,15 @@ public struct ContentView: View {
         let isBroadcasting = broadcastManager.isRecording
         print("📡 [PTT] 屏幕直播状态: \(isBroadcasting)")
         
-        // 3. 恢复媒体声音语音识别
+        // 3. 根据直播状态决定是否断开socket
         if isBroadcasting {
+            // 如果在屏幕直播，恢复媒体声音识别
             print("▶️ [PTT] 恢复媒体声音识别，保留之前的文字")
             realtimeAudioManager.startMonitoring()
+        } else {
+            // 如果没有屏幕直播，断开socket连接
+            print("🔌 [PTT] 没有屏幕直播，断开socket连接")
+            realtimeAudioManager.stopMonitoring()
         }
         
         // 4. 如果在屏幕直播，使用远程命令恢复后台音乐

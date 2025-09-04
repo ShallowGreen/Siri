@@ -53,12 +53,19 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         super.init()
         // 设置音频会话确保扬声器输出
         setupAudioSession()
-        setupSocketConnection()
+        // 不再在初始化时连接socket，改为按需连接
+        // setupSocketConnection()
         setupDarwinNotifications()
     }
     
     // MARK: - Socket.IO Setup
     private func setupSocketConnection() {
+        // 如果已经设置过，不再重复设置
+        if socket != nil {
+            logger.info("🔧 Socket已经配置，跳过重复设置")
+            return
+        }
+        
         guard let url = URL(string: serverURL) else {
             errorMessage = "Invalid server URL"
             logger.error("❌ Invalid server URL: \(self.serverURL)")
@@ -72,8 +79,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             .compress,
             .forceWebsockets(true),
             .forcePolling(false),
-            .reconnects(true),
-            .reconnectAttempts(3),
+            .reconnects(false),  // 禁用自动重连，手动控制连接
+            .reconnectAttempts(1),
             .reconnectWait(1),
             .reconnectWaitMax(5)
         ])
@@ -169,6 +176,11 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     // MARK: - Connection Management
     private func connectToServerAndStartRecording() {
         logger.info("🔌 Attempting to connect to realtime transcription server...")
+        
+        // 确保socket已经设置
+        if socket == nil {
+            setupSocketConnection()
+        }
         
         if isConnected {
             logger.info("✅ Already connected to realtime server")
@@ -448,13 +460,34 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     
     public func stopMonitoring() {
         logger.info("🛑 停止实时音频流监控")
+        
+        // 防止重复调用
+        guard isProcessing || isRecording else {
+            logger.info("⚠️ 监控已经停止，跳过重复操作")
+            return
+        }
+        
         stopRecognition()
         
         if isRecording {
             stopAudioCapture()
         }
         
-        socket?.emit("stop-transcription")
+        if isConnected {
+            socket?.emit("stop-transcription")
+        }
+        
+        // 断开socket连接
+        disconnectSocket()
+    }
+    
+    // 新增：断开socket连接的方法
+    private func disconnectSocket() {
+        if isConnected || socket?.status == .connecting {
+            logger.info("🔌 断开Socket.IO连接")
+            socket?.disconnect()
+            isConnected = false
+        }
     }
     
     // MARK: - Text Preservation Methods
@@ -775,6 +808,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             CFNotificationName("dev.tuist2.Siri.audiodata" as CFString),
             nil
         )
+        // 在deinit中直接断开socket，不调用主线程隔离的方法
         socket?.disconnect()
     }
     
@@ -1258,33 +1292,70 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     
     // 完全模仿ScreenBroadcastHandler的stopAudioRecording方法
     private func stopM4ARecording() {
-        guard let writer = m4aAudioWriter else { return }
+        guard let writer = m4aAudioWriter else { 
+            logger.info("⚠️ m4aAudioWriter已经为nil，跳过停止录制")
+            return 
+        }
         
-        m4aAudioWriterInput?.markAsFinished()
+        // 检查writer状态，避免在错误状态下调用finishWriting
+        logger.info("🔍 AVAssetWriter状态: \(writer.status.rawValue)")
         
-        // 保存URL的副本，防止在异步块中被清空
-        let audioFileURL = currentM4AFileURL
-        
-        writer.finishWriting { [weak self] in
-            if writer.status == .completed {
-                self?.logger.info("✅ 音频文件录制完成")
-                if let url = audioFileURL {
-                    Task { @MainActor in
-                        self?.notifyM4AAudioFileCompleted(fileURL: url)
-                    }
-                    self?.logger.info("📁 音频文件已保存: \(url.lastPathComponent)")
-                }
-            } else if let error = writer.error {
-                self?.logger.error("❌ 音频文件写入失败: \(error.localizedDescription)")
-            }
+        // 只有在writing状态下才调用finishWriting
+        if writer.status == .writing {
+            m4aAudioWriterInput?.markAsFinished()
             
-            // 清理引用
-            Task { @MainActor in
-                self?.m4aAudioWriter = nil
-                self?.m4aAudioWriterInput = nil
-                self?.currentM4AFileURL = nil
-                self?.m4aStartTime = nil  // 确保重置开始时间
+            // 保存URL的副本，防止在异步块中被清空
+            let audioFileURL = currentM4AFileURL
+            
+            writer.finishWriting { [weak self] in
+                if writer.status == .completed {
+                    self?.logger.info("✅ 音频文件录制完成")
+                    if let url = audioFileURL {
+                        Task { @MainActor in
+                            self?.notifyM4AAudioFileCompleted(fileURL: url)
+                        }
+                        self?.logger.info("📁 音频文件已保存: \(url.lastPathComponent)")
+                    }
+                } else if let error = writer.error {
+                    self?.logger.error("❌ 音频文件写入失败: \(error.localizedDescription)")
+                }
+                
+                // 清理引用
+                Task { @MainActor in
+                    self?.m4aAudioWriter = nil
+                    self?.m4aAudioWriterInput = nil
+                    self?.currentM4AFileURL = nil
+                    self?.m4aStartTime = nil  // 确保重置开始时间
+                }
             }
+        } else if writer.status == .failed {
+            logger.error("❌ AVAssetWriter已经失败: \(writer.error?.localizedDescription ?? "未知错误")")
+            // 直接清理引用
+            m4aAudioWriter = nil
+            m4aAudioWriterInput = nil
+            currentM4AFileURL = nil
+            m4aStartTime = nil
+        } else if writer.status == .cancelled {
+            logger.info("⚠️ AVAssetWriter已经取消")
+            // 直接清理引用
+            m4aAudioWriter = nil
+            m4aAudioWriterInput = nil
+            currentM4AFileURL = nil
+            m4aStartTime = nil
+        } else if writer.status == .completed {
+            logger.info("ℹ️ AVAssetWriter已经完成")
+            // 直接清理引用
+            m4aAudioWriter = nil
+            m4aAudioWriterInput = nil
+            currentM4AFileURL = nil
+            m4aStartTime = nil
+        } else {
+            logger.warning("⚠️ AVAssetWriter处于未知状态: \(writer.status.rawValue)")
+            // 安全起见，清理引用
+            m4aAudioWriter = nil
+            m4aAudioWriterInput = nil
+            currentM4AFileURL = nil
+            m4aStartTime = nil
         }
     }
     
