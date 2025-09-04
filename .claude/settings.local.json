@@ -5,7 +5,13 @@
       "Bash(tuist generate:*)",
       "Bash(xcodebuild:*)",
       "WebSearch",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Read(//Users/zhaoyao/Downloads/**)",
+      "Bash(tuist clean:*)",
+      "Read(//Users/zhaoyao/Library/Developer/Xcode/DerivedData/**)",
+      "Bash(curl:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [],
     "ask": []

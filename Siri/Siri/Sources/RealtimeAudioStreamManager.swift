@@ -17,8 +17,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private let logger = Logger(subsystem: "dev.tuist.Siri", category: "RealtimeAudio")
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let logger = Logger(subsystem: "dev.tuist2.Siri", category: "RealtimeAudio")
+    private let appGroupID = "group.dev.tuist2.Siri"
     
     private var darwinNotificationCenter: CFNotificationCenter?
     private var audioBufferQueue = [CMSampleBuffer]()
@@ -94,7 +94,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     private func setupDarwinNotifications() {
         darwinNotificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
         
-        let notificationName = "dev.tuist.Siri.audiodata" as CFString
+        let notificationName = "dev.tuist2.Siri.audiodata" as CFString
         let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
         
         CFNotificationCenterAddObserver(
@@ -442,7 +442,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         CFNotificationCenterRemoveObserver(
             darwinNotificationCenter,
             observer,
-            CFNotificationName("dev.tuist.Siri.audiodata" as CFString),
+            CFNotificationName("dev.tuist2.Siri.audiodata" as CFString),
             nil
         )
     }
@@ -1002,7 +1002,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             
             // 发送Darwin通知
             let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
-            let notificationName = CFNotificationName("dev.tuist.Siri.realtimeAudioSaved" as CFString)
+            let notificationName = CFNotificationName("dev.tuist2.Siri.realtimeAudioSaved" as CFString)
             CFNotificationCenterPostNotification(darwinCenter, notificationName, nil, nil, true)
             
             logger.info("📡 已通知M4A音频文件完成")

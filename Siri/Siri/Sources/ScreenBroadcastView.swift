@@ -558,7 +558,7 @@ class InaudibleAudioPlayer: ObservableObject {
     
     private func setupInaudibleAudio() {
         // 获取预生成的高频音频文件
-        let appGroupID = "group.dev.tuist.Siri"
+        let appGroupID = "group.dev.tuist2.Siri"
         guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
             print("❌ 无法获取App Group容器路径")
             return

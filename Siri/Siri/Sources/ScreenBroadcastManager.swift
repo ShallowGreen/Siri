@@ -17,8 +17,8 @@ public class ScreenBroadcastManager: ObservableObject {
     @Published public var currentRecordingFileName: String? = nil
     
     // MARK: - Private Properties
-    private let appGroupID = "group.dev.tuist.Siri"
-    private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
+    private let appGroupID = "group.dev.tuist2.Siri"
+    private let logger = Logger(subsystem: "dev.tuist2.Siri", category: "ScreenBroadcast")
     private var statusCheckTimer: Timer?
     private let audioFileManager = AudioFileManager()
     private var audioPlayer: AVAudioPlayer?
@@ -85,7 +85,7 @@ public class ScreenBroadcastManager: ObservableObject {
         logger.info("🎛️ 显示系统直播选择器")
         
         let broadcastPicker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
-        broadcastPicker.preferredExtension = "dev.tuist.Siri.ScreenBroadcastExtension"
+        broadcastPicker.preferredExtension = "dev.tuist2.Siri.ScreenBroadcastExtension"
         broadcastPicker.showsMicrophoneButton = false
         
         window.addSubview(broadcastPicker)
@@ -390,7 +390,7 @@ public class ScreenBroadcastManager: ObservableObject {
         darwinNotificationCenter = CFNotificationCenterGetDarwinNotifyCenter()
         
         // 监听实时音频保存通知
-        let notificationName = "dev.tuist.Siri.realtimeAudioSaved" as CFString
+        let notificationName = "dev.tuist2.Siri.realtimeAudioSaved" as CFString
         let observer = UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
         
         CFNotificationCenterAddObserver(
@@ -416,7 +416,7 @@ public class ScreenBroadcastManager: ObservableObject {
         CFNotificationCenterRemoveObserver(
             center,
             observer,
-            CFNotificationName("dev.tuist.Siri.realtimeAudioSaved" as CFString),
+            CFNotificationName("dev.tuist2.Siri.realtimeAudioSaved" as CFString),
             nil
         )
         

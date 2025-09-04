@@ -39,11 +39,11 @@ xcodebuild -workspace Siri.xcworkspace -scheme Siri -destination 'platform=iOS S
 The application consists of three main targets configured in `Project.swift`:
 
 1. **Main App (Siri)**: SwiftUI-based iOS application
-   - Bundle ID: `dev.tuist.Siri`
+   - Bundle ID: `dev.tuist2.Siri`
    - Entry point: `SiriApp.swift`
 
 2. **Screen Broadcast Extension**: System extension for capturing audio
-   - Bundle ID: `dev.tuist.Siri.ScreenBroadcastExtension`
+   - Bundle ID: `dev.tuist2.Siri.ScreenBroadcastExtension`
    - Principal class: `ScreenBroadcastHandler`
 
 3. **Unit Tests (SiriTests)**: Test target for the main app
@@ -68,7 +68,7 @@ The application consists of three main targets configured in `Project.swift`:
 - Audio saved as M4A files (AAC codec, 44.1kHz, stereo, 128kbps)
 
 ### Inter-Process Communication
-The main app and broadcast extension communicate through App Group (`group.dev.tuist.Siri`) using JSON files:
+The main app and broadcast extension communicate through App Group (`group.dev.tuist2.Siri`) using JSON files:
 - `broadcast_status.json`: Broadcasting state updates
 - `audio_data.json`: Real-time audio level data
 - `audio_notification.json`: Audio file creation/completion events

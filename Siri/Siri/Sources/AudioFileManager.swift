@@ -7,8 +7,8 @@ public class AudioFileManager {
     
     // MARK: - Properties
     
-    private let logger = Logger(subsystem: "dev.tuist.Siri", category: "AudioFileManager")
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let logger = Logger(subsystem: "dev.tuist2.Siri", category: "AudioFileManager")
+    private let appGroupID = "group.dev.tuist2.Siri"
     private var audioFileHandle: FileHandle?
     private var currentAudioFileURL: URL?
     private var audioFormat: AVAudioFormat?

@@ -8,8 +8,8 @@ import os.log
 @objc(ScreenBroadcastHandler)
 public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
     
-    private let logger = Logger(subsystem: "dev.tuist.Siri", category: "ScreenBroadcast")
-    private let appGroupID = "group.dev.tuist.Siri"
+    private let logger = Logger(subsystem: "dev.tuist2.Siri", category: "ScreenBroadcast")
+    private let appGroupID = "group.dev.tuist2.Siri"
     
     // 状态管理
     private var isRecording = false
@@ -416,7 +416,7 @@ public class ScreenBroadcastHandler: RPBroadcastSampleHandler {
             
             // 发送Darwin通知告知主程序有新音频数据
             let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
-            let notificationName = CFNotificationName("dev.tuist.Siri.audiodata" as CFString)
+            let notificationName = CFNotificationName("dev.tuist2.Siri.audiodata" as CFString)
             CFNotificationCenterPostNotification(darwinCenter, notificationName, nil, nil, true)
             
             logger.debug("✅ [Extension] 音频数据已发送: \(dataLength) bytes, 格式: \(streamDescription.pointee.mFormatID)")
