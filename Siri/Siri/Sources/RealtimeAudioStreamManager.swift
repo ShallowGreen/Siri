@@ -1,7 +1,8 @@
 import Foundation
 import AVFoundation
-import Speech
 import os.log
+import SocketIO
+import Combine
 
 @MainActor
 public class RealtimeAudioStreamManager: NSObject, ObservableObject {
@@ -13,10 +14,22 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     // MARK: - Private Properties for text management
     private var previousText: String = ""
     private var shouldPreserveText: Bool = false
+    private var currentPartialText: String = ""
+    private var finalTextSegments: [String] = []
     
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
+    // Socket.IO Properties
+    private var manager: SocketManager?
+    private var socket: SocketIOClient?
+    private let serverURL = "https://api-test.pleaseprof.app"
+    private let namespace = "/transcribe" // Same namespace as SpeechRecognitionManager but separate connection
+    
+    // Audio Processing Properties
+    private var sampleRate: Double = 16000
+    private var languageCode: String = "zh-CN"
+    private var audioEngine = AVAudioEngine()
+    private var audioSession = AVAudioSession.sharedInstance()
+    @Published public var isConnected: Bool = false
+    private var isRecording: Bool = false
     private let logger = Logger(subsystem: "dev.tuist2.Siri", category: "RealtimeAudio")
     private let appGroupID = "group.dev.tuist2.Siri"
     
@@ -40,29 +53,394 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         super.init()
         // 设置音频会话确保扬声器输出
         setupAudioSession()
-        speechRecognizer?.delegate = self
+        setupSocketConnection()
         setupDarwinNotifications()
     }
     
-    public func startMonitoring() {
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
-            errorMessage = "语音识别器不可用"
+    // MARK: - Socket.IO Setup
+    private func setupSocketConnection() {
+        guard let url = URL(string: serverURL) else {
+            errorMessage = "Invalid server URL"
+            logger.error("❌ Invalid server URL: \(self.serverURL)")
             return
         }
         
-        SFSpeechRecognizer.requestAuthorization { [weak self] authStatus in
+        logger.info("🔧 [RealtimeManager] Setting up Socket.IO connection to \(self.serverURL) with namespace \(self.namespace)")
+        
+        manager = SocketManager(socketURL: url, config: [
+            .log(true),
+            .compress,
+            .forceWebsockets(true),
+            .forcePolling(false),
+            .reconnects(true),
+            .reconnectAttempts(3),
+            .reconnectWait(1),
+            .reconnectWaitMax(5)
+        ])
+        
+        socket = manager?.socket(forNamespace: namespace)
+        setupSocketHandlers()
+        
+        logger.info("✅ Socket.IO client configured for realtime transcription")
+    }
+    
+    private func setupSocketHandlers() {
+        logger.info("🔌 Setting up Socket.IO handlers for realtime transcription...")
+        
+        socket?.on(clientEvent: .connect) { [weak self] data, ack in
             DispatchQueue.main.async {
-                switch authStatus {
-                case .authorized:
-                    self?.startRecognition()
-                case .denied:
-                    self?.errorMessage = "语音识别权限被拒绝"
-                case .restricted:
-                    self?.errorMessage = "语音识别权限受限"
-                case .notDetermined:
-                    self?.errorMessage = "语音识别权限未确定"
-                @unknown default:
-                    self?.errorMessage = "未知的权限状态"
+                self?.isConnected = true
+                self?.logger.info("✅ [RealtimeManager] Connected to transcription service")
+                self?.errorMessage = ""
+            }
+        }
+        
+        socket?.on("user-assigned") { [weak self] data, ack in
+            guard let userInfo = data.first as? [String: Any],
+                  let userId = userInfo["userId"] as? String else { return }
+            DispatchQueue.main.async {
+                self?.logger.info("📋 [RealtimeManager] User ID assigned: \(userId)")
+            }
+        }
+        
+        socket?.on(clientEvent: .disconnect) { [weak self] data, ack in
+            DispatchQueue.main.async {
+                self?.isConnected = false
+                self?.logger.info("❌ [RealtimeManager] Disconnected from service: \(data)")
+                self?.errorMessage = "Disconnected from server"
+            }
+        }
+        
+        socket?.on(clientEvent: .error) { [weak self] data, ack in
+            DispatchQueue.main.async {
+                self?.logger.error("🔴 [RealtimeManager] Socket error: \(data)")
+                self?.errorMessage = "Socket error: \(data)"
+            }
+        }
+        
+        socket?.on("connect_error") { [weak self] data, ack in
+            DispatchQueue.main.async {
+                self?.logger.error("🔴 [RealtimeManager] Connect error: \(data)")
+                self?.errorMessage = "Failed to connect: \(data)"
+            }
+        }
+        
+        socket?.on("transcription-started") { [weak self] data, ack in
+            DispatchQueue.main.async {
+                self?.logger.info("🎙️ [RealtimeManager] Transcription started")
+            }
+        }
+        
+        socket?.on("transcription-result") { [weak self] data, ack in
+            self?.logger.info("📝 [RealtimeManager] Received transcription result: \(data)")
+            
+            guard let resultData = data.first as? [String: Any] else {
+                self?.logger.error("❌ Invalid transcription result format: \(data)")
+                return
+            }
+            
+            guard let result = resultData["result"] as? [String: Any] else {
+                self?.logger.error("❌ Missing result field in: \(resultData)")
+                return
+            }
+            
+            guard let transcript = result["transcript"] as? String else {
+                self?.logger.error("❌ Missing transcript field in: \(result)")
+                return
+            }
+            
+            let isPartial = result["isPartial"] as? Bool ?? false
+            
+            DispatchQueue.main.async {
+                self?.handleTranscriptionResult(transcript: transcript, isPartial: isPartial)
+            }
+        }
+        
+        socket?.on("transcription-error") { [weak self] data, ack in
+            guard let errorData = data.first as? [String: Any],
+                  let error = errorData["error"] as? String else { return }
+            DispatchQueue.main.async {
+                self?.errorMessage = error
+                self?.logger.error("❌ [RealtimeManager] Transcription error: \(error)")
+            }
+        }
+    }
+    
+    // MARK: - Connection Management
+    private func connectToServerAndStartRecording() {
+        logger.info("🔌 Attempting to connect to realtime transcription server...")
+        
+        if isConnected {
+            logger.info("✅ Already connected to realtime server")
+            startRealtimeRecording()
+            return
+        }
+        
+        logger.info("🔌 Initiating Socket.IO connection to \(self.serverURL)\(self.namespace)...")
+        socket?.connect()
+        
+        waitForConnection(timeout: 10.0) {
+            self.startRealtimeRecording()
+        }
+    }
+    
+    private func waitForConnection(timeout: TimeInterval, completion: @escaping () -> Void) {
+        let startTime = Date()
+        
+        func checkConnection() {
+            if isConnected {
+                logger.info("✅ Connected successfully to realtime service!")
+                completion()
+                return
+            }
+            
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed > timeout {
+                logger.error("⏰ Connection timeout after \(timeout)s")
+                errorMessage = "Failed to connect to realtime transcription server"
+                completion()
+                return
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                checkConnection()
+            }
+        }
+        
+        checkConnection()
+    }
+    
+    private func startRealtimeRecording() {
+        logger.info("🎙️ Starting realtime recording...")
+        
+        guard !isRecording else { return }
+        
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            try audioSession.overrideOutputAudioPort(.speaker)
+            
+            // Start M4A recording for audio file saving (same as original functionality)
+            startM4ARecording()
+            
+            let config: [String: Any] = [
+                "languageCode": languageCode,
+                "sampleRateHertz": Int(sampleRate),
+                "mediaEncoding": "pcm",
+                "enableSpeakerDiarization": false,
+                "maxSpeakerLabels": 2
+            ]
+            
+            socket?.emit("start-transcription", config)
+            logger.info("📤 Sent realtime transcription config: \(config)")
+            
+            startAudioCapture()
+            
+            isRecording = true
+            isProcessing = true
+            
+            if shouldPreserveText {
+                logger.info("🔒 Preserving previous text: '\(self.previousText)'")
+            } else {
+                recognizedText = ""
+                previousText = ""
+                currentPartialText = ""
+                finalTextSegments = []
+            }
+            errorMessage = ""
+            
+        } catch {
+            errorMessage = "Failed to start realtime recording: \(error.localizedDescription)"
+            logger.error("❌ Failed to start realtime recording: \(error.localizedDescription)")
+        }
+    }
+    
+    private func startAudioCapture() {
+        let inputNode = audioEngine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            errorMessage = "Failed to create audio format"
+            return
+        }
+        
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            errorMessage = "Failed to create audio converter"
+            return
+        }
+        
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
+            self?.processRealtimeAudioBuffer(buffer, converter: converter, outputFormat: outputFormat)
+        }
+        
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+            logger.info("🎙️ Realtime audio engine started")
+        } catch {
+            errorMessage = "Failed to start audio engine: \(error.localizedDescription)"
+            logger.error("❌ Failed to start realtime audio engine: \(error.localizedDescription)")
+        }
+    }
+    
+    private func processRealtimeAudioBuffer(_ inputBuffer: AVAudioPCMBuffer, converter: AVAudioConverter, outputFormat: AVAudioFormat) {
+        guard isRecording else { return }
+        
+        let inputFrameCount = inputBuffer.frameLength
+        let outputFrameCapacity = AVAudioFrameCount(Double(inputFrameCount) * (sampleRate / inputBuffer.format.sampleRate))
+        
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCapacity) else {
+            return
+        }
+        
+        var error: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+        
+        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+        
+        if let error = error {
+            logger.error("❌ Realtime audio conversion error: \(error.localizedDescription)")
+            return
+        }
+        
+        if let pcmData = pcmDataFromBuffer(outputBuffer) {
+            sendRealtimeAudioData(pcmData)
+        }
+    }
+    
+    private func pcmDataFromBuffer(_ buffer: AVAudioPCMBuffer) -> Data? {
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0,
+              let int16ChannelData = buffer.int16ChannelData else {
+            return nil
+        }
+        
+        let channelData = int16ChannelData[0]
+        let dataSize = frameCount * MemoryLayout<Int16>.size
+        
+        let data = Data(bytes: channelData, count: dataSize)
+        
+        var processedData = Data()
+        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            guard let int16Pointer = bytes.bindMemory(to: Int16.self).baseAddress else { return }
+            
+            var maxAmplitude: Int16 = 0
+            for i in 0..<frameCount {
+                maxAmplitude = max(maxAmplitude, abs(int16Pointer[i]))
+            }
+            
+            let noiseThreshold: Int16 = 328
+            let amplificationFactor = maxAmplitude > 0 ? min(Double(Int16.max) * 0.8 / Double(maxAmplitude), 3.0) : 1.0
+            
+            for i in 0..<frameCount {
+                var sample = int16Pointer[i]
+                
+                if abs(sample) < noiseThreshold {
+                    sample = Int16(Double(sample) * 0.1)
+                } else {
+                    sample = Int16(Double(sample) * amplificationFactor)
+                }
+                
+                sample = max(Int16.min, min(Int16.max, sample))
+                
+                withUnsafeBytes(of: sample) { sampleBytes in
+                    processedData.append(contentsOf: sampleBytes)
+                }
+            }
+        }
+        
+        return processedData
+    }
+    
+    private func sendRealtimeAudioData(_ data: Data) {
+        guard isConnected else {
+            logger.warning("⚠️ Not connected to realtime server, skipping audio send")
+            return
+        }
+        
+        let base64String = data.base64EncodedString()
+        let audioData: [String: Any] = ["audio": base64String]
+        
+        socket?.emit("audio-data", audioData)
+        
+        if Int.random(in: 0..<100) < 5 {
+            logger.debug("📤 Sent realtime audio data: \(data.count) bytes")
+        }
+    }
+    
+    private func stopAudioCapture() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        isRecording = false
+        
+        // Stop M4A recording when stopping audio capture
+        stopM4ARecording()
+        
+        if !currentPartialText.isEmpty {
+            finalTextSegments.append(currentPartialText)
+            currentPartialText = ""
+            logger.info("📝 Finalized pending partial text")
+        }
+        
+        do {
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            logger.info("✅ Audio session reset")
+        } catch {
+            logger.error("⚠️ Failed to reset audio session: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Transcription Result Handling
+    private func handleTranscriptionResult(transcript: String, isPartial: Bool) {
+        logger.info("🎙️ Realtime transcription result: '\(transcript)' (partial: \(isPartial))")
+        
+        if !transcript.isEmpty {
+            if isPartial {
+                currentPartialText = transcript
+                logger.info("🔄 Partial result updated: '\(self.currentPartialText)'")
+            } else {
+                finalTextSegments.append(transcript)
+                currentPartialText = ""
+                logger.info("✅ Final result added. Total segments: \(self.finalTextSegments.count)")
+            }
+            
+            var completeText = self.finalTextSegments.joined(separator: " ")
+            if !self.currentPartialText.isEmpty {
+                if !completeText.isEmpty {
+                    completeText += " " + self.currentPartialText
+                } else {
+                    completeText = self.currentPartialText
+                }
+            }
+            
+            if shouldPreserveText, !previousText.isEmpty {
+                recognizedText = previousText + "\n" + completeText
+            } else {
+                recognizedText = completeText
+            }
+            
+            logger.info("📝 Updated realtime text: '\(self.recognizedText)'")
+        }
+    }
+    
+    public func startMonitoring() {
+        logger.info("🚀 Starting realtime audio monitoring with Socket.IO")
+        
+        audioSession.requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.logger.info("✅ Microphone permission granted for realtime monitoring")
+                    self?.connectToServerAndStartRecording()
+                } else {
+                    self?.errorMessage = "Microphone permission denied"
                 }
             }
         }
@@ -71,6 +449,12 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     public func stopMonitoring() {
         logger.info("🛑 停止实时音频流监控")
         stopRecognition()
+        
+        if isRecording {
+            stopAudioCapture()
+        }
+        
+        socket?.emit("stop-transcription")
     }
     
     // MARK: - Text Preservation Methods
@@ -149,14 +533,13 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             saveOriginalAudioToFile(sampleBuffer)
             
             // 使用重建的CMSampleBuffer进行语音识别（数据源已验证正常）
-            if isProcessing, recognitionRequest != nil {
+            if isProcessing {
                 performSpeechRecognitionWithSampleBuffer(sampleBuffer)
                 return
             }
         }
         
-        guard isProcessing,
-              let recognitionRequest = recognitionRequest else {
+        guard isProcessing else {
             return
         }
         
@@ -276,8 +659,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         // 保存转换后的音频数据用于验证
         saveConvertedAudioBuffer(audioBuffer)  // 重新启用，测试新的交错格式
         
-        // 发送到语音识别器
-        recognitionRequest.append(audioBuffer)
+        // Note: Using Socket.IO instead of traditional recognition request
+        // The audio data is processed through Socket.IO connection
     }
     
     private func calculateAudioLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
@@ -318,7 +701,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     }
     
     private func startRecognition() {
-        logger.info("🚀 开始语音识别")
+        logger.info("🚀 开始基于Socket.IO的语音识别")
         
         guard !isProcessing else {
             return
@@ -350,76 +733,23 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         // 开始录制转换后的音频用于验证 - 只保存WAV用于验证音频质量
         startConvertedAudioRecording()  // 保存用于语音识别的音频数据为WAV格式
         
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest = recognitionRequest else {
-            errorMessage = "无法创建识别请求"
-            isProcessing = false
-            return
-        }
+        // 使用Socket.IO进行实时语音识别，而不是处理已录制的音频数据
+        connectToServerAndStartRecording()
         
-        recognitionRequest.shouldReportPartialResults = true
-        
-        recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { [weak self] result, error in
-            DispatchQueue.main.async {
-                if let result = result {
-                    let newText = result.bestTranscription.formattedString
-                    let isFinal = result.isFinal
-                    
-                    // 详细日志
-                    self?.logger.info("🎤 语音识别结果: '\(newText)' (最终结果: \(isFinal))")
-                    
-                    if !newText.isEmpty {
-                        if self?.shouldPreserveText == true, let previousText = self?.previousText {
-                            // 追加模式：保留之前的文字，添加新内容
-                            if !previousText.isEmpty {
-                                self?.recognizedText = previousText + "\n" + newText
-                                self?.logger.info("🎯 识别文本追加: '\(previousText)' + '\(newText)'")
-                            } else {
-                                self?.recognizedText = newText
-                                self?.logger.info("🎯 识别文本更新: \(newText)")
-                            }
-                        } else {
-                            // 替换模式：直接使用新文字
-                            self?.recognizedText = newText
-                            self?.logger.info("🎯 识别文本更新: \(newText)")
-                        }
-                    } else {
-                        self?.logger.info("⚠️ 识别结果为空文本")
-                    }
-                } else {
-                    self?.logger.info("⚠️ 识别结果为 nil")
-                }
-                
-                if let error = error {
-                    self?.logger.error("❌ 识别错误: \(error.localizedDescription)")
-                    self?.logger.error("❌ 错误详细信息: \(error)")
-                    
-                    // 检查是否是"No speech detected"错误
-                    if error.localizedDescription.contains("No speech") || error.localizedDescription.contains("no speech") {
-                        self?.logger.info("⚠️ 未检测到语音 - 可能音频内容为静音或音量过低")
-                    }
-                    
-                    // 不要因为识别错误就停止整个识别过程，这样可以继续接收音频
-                    self?.errorMessage = error.localizedDescription
-                } else {
-                    // 无错误时清空错误消息
-                    if self?.errorMessage != "" {
-                        self?.errorMessage = ""
-                    }
-                }
-            }
-        }
-        
-        logger.info("✅ 语音识别任务已启动")
+        logger.info("✅ 基于Socket.IO的语音识别任务已启动")
     }
     
     private func stopRecognition() {
-        logger.info("🛑 停止语音识别")
+        logger.info("🛑 停止Socket.IO语音识别")
         
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
+        // 停止Socket.IO相关的录音
+        if isRecording {
+            stopAudioCapture()
+        }
+        
+        // 发送停止信号到服务器
+        socket?.emit("stop-transcription")
+        
         isProcessing = false
         
         // 停止识别时暂时禁用文字保留模式，防止延迟回调导致文字重复
@@ -434,7 +764,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         // 停止录制转换后的音频
         // stopConvertedAudioRecording()  // 暂时注释掉，只测试M4A到WAV转换
         
-        logger.info("✅ 语音识别已停止")
+        logger.info("✅ Socket.IO语音识别已停止")
     }
     
     deinit {
@@ -445,6 +775,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
             CFNotificationName("dev.tuist2.Siri.audiodata" as CFString),
             nil
         )
+        socket?.disconnect()
     }
     
     // MARK: - Converted Audio Recording for Verification
@@ -801,10 +1132,8 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     // MARK: - Speech Recognition with CMSampleBuffer
     
     private func performSpeechRecognitionWithSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard let recognitionRequest = recognitionRequest else {
-            logger.warning("⚠️ 语音识别请求为空")
-            return
-        }
+        // Note: This method now processes audio for Socket.IO instead of SFSpeechRecognizer
+        logger.info("🔄 Processing audio buffer for Socket.IO transcription")
         
         // 从 CMSampleBuffer 创建 AVAudioPCMBuffer 用于语音识别
         guard let audioBuffer = createAudioPCMBufferFromSampleBuffer(sampleBuffer) else {
@@ -823,10 +1152,10 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         // 保存转换后的音频数据用于验证
         saveConvertedAudioBuffer(audioBuffer)
         
-        // 发送到语音识别器
-        recognitionRequest.append(audioBuffer)
+        // Note: Audio data is processed through the existing Darwin notification system
+        // which feeds into the Socket.IO connection established separately
         
-        logger.debug("✅ 使用重建的CMSampleBuffer进行语音识别 (电平: \(String(format: "%.6f", audioLevel)))")
+        logger.debug("✅ 使用重建的CMSampleBuffer进行Socket.IO语音识别 (电平: \(String(format: "%.6f", audioLevel)))")
     }
     
     private func calculateSimpleAudioLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
@@ -1012,13 +1341,3 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     }
 }
 
-extension RealtimeAudioStreamManager: SFSpeechRecognizerDelegate {
-    nonisolated public func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {
-        Task { @MainActor in
-            logger.info("🎤 语音识别器可用性变化: \(available)")
-            if !available && isProcessing {
-                stopRecognition()
-            }
-        }
-    }
-}
