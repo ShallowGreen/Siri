@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Speech
+import SocketIO
 import os.log
 
 @MainActor
@@ -9,6 +10,7 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     @Published public var isProcessing: Bool = false
     @Published public var recognizedText: String = ""
     @Published public var errorMessage: String = ""
+    @Published public var isConnected: Bool = false
     
     // MARK: - Private Properties for text management
     private var previousText: String = ""
@@ -36,41 +38,34 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     private var currentM4AFileURL: URL?
     private var m4aStartTime: CMTime?
     
+    // MARK: - Socket.IO (远程语音识别)
+    private var socketManager: SocketManager?
+    private var socket: SocketIOClient?
+    private let serverURL = "https://api-test.pleaseprof.app"
+    private let namespace = "/transcribe"
+    private var transcriptionStarted: Bool = false
+    
+    // 说话人分离显示状态
+    private var lastSpeaker: String? = nil
+    private var diarizedLines: [(speaker: String, text: String, isFinal: Bool)] = []
+    
     public override init() {
         super.init()
         // 设置音频会话确保扬声器输出
         setupAudioSession()
         speechRecognizer?.delegate = self
         setupDarwinNotifications()
+        setupSocket()
     }
     
     public func startMonitoring() {
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
-            errorMessage = "语音识别器不可用"
-            return
-        }
-        
-        SFSpeechRecognizer.requestAuthorization { [weak self] authStatus in
-            DispatchQueue.main.async {
-                switch authStatus {
-                case .authorized:
-                    self?.startRecognition()
-                case .denied:
-                    self?.errorMessage = "语音识别权限被拒绝"
-                case .restricted:
-                    self?.errorMessage = "语音识别权限受限"
-                case .notDetermined:
-                    self?.errorMessage = "语音识别权限未确定"
-                @unknown default:
-                    self?.errorMessage = "未知的权限状态"
-                }
-            }
-        }
+        // 改为使用 Socket 进行识别，无需 SFSpeech 授权
+        startSocketRecognition()
     }
     
     public func stopMonitoring() {
         logger.info("🛑 停止实时音频流监控")
-        stopRecognition()
+        stopSocketRecognition()
     }
     
     // MARK: - Text Preservation Methods
@@ -144,140 +139,42 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
     }
     
     private func processAudioData(_ data: Data, formatInfo: [String: Any]) {
-        // 首先，使用原始数据重建CMSampleBuffer并保存到m4a文件（完全模仿ScreenBroadcastHandler）
-        if let sampleBuffer = createSampleBufferFromData(data, formatInfo: formatInfo) {
-            saveOriginalAudioToFile(sampleBuffer)
-            
-            // 使用重建的CMSampleBuffer进行语音识别（数据源已验证正常）
-            if isProcessing, recognitionRequest != nil {
-                performSpeechRecognitionWithSampleBuffer(sampleBuffer)
-                return
-            }
-        }
-        
-        guard isProcessing,
-              let recognitionRequest = recognitionRequest else {
-            return
-        }
-        
-        // 从格式信息中获取音频参数
-        guard let sampleRate = formatInfo["sampleRate"] as? Double,
-              let channels = formatInfo["channels"] as? UInt32,
-              let formatID = formatInfo["formatID"] as? UInt32,
-              let bitsPerChannel = formatInfo["bitsPerChannel"] as? UInt32 else {
-            logger.error("❌ 无法解析音频格式信息")
-            return
-        }
-        
-        // 只在首次识别格式时记录
-        if !hasLoggedFormat && (formatID == kAudioFormatLinearPCM || formatID == 1819304813) {
+        // 先保存到 M4A（数据源保持不变）并转换为识别需要的16k单声道PCM
+        guard let sampleBuffer = createSampleBufferFromData(data, formatInfo: formatInfo) else { return }
+        saveOriginalAudioToFile(sampleBuffer)
+        guard isProcessing else { return }
+
+        // 仅记录一次原始格式
+        if !hasLoggedFormat,
+           let sampleRate = formatInfo["sampleRate"] as? Double,
+           let channels = formatInfo["channels"] as? UInt32,
+           let bitsPerChannel = formatInfo["bitsPerChannel"] as? UInt32 {
             logger.info("🎵 PCM格式: \(sampleRate)Hz, \(channels)声道, \(bitsPerChannel)位")
             hasLoggedFormat = true
         }
-        
-        // 创建合适的音频格式
-        var audioFormat: AVAudioFormat?
-        
-        // 根据实际格式创建AVAudioFormat - 使用与成功WAV转换相同的格式
-        // kAudioFormatLinearPCM = 1819304813 ('lpcm') 是线性PCM格式的标识符
-        if formatID == kAudioFormatLinearPCM || formatID == 1819304813 {
-            // PCM格式 - 参考成功的WAV转换格式
-            if bitsPerChannel == 16 {
-                // 16位整数 - 使用与WAV转换相同的格式参数
-                // 参考AudioFileManager中成功的转换格式：
-                // mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian
-                var asbd = AudioStreamBasicDescription()
-                asbd.mSampleRate = sampleRate
-                asbd.mFormatID = kAudioFormatLinearPCM
-                asbd.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian
-                asbd.mBitsPerChannel = 16
-                asbd.mChannelsPerFrame = UInt32(channels)
-                asbd.mBytesPerFrame = asbd.mChannelsPerFrame * 2
-                asbd.mFramesPerPacket = 1
-                asbd.mBytesPerPacket = asbd.mBytesPerFrame
-                
-                audioFormat = AVAudioFormat(streamDescription: &asbd)
-                logger.info("🎵 使用WAV兼容格式: 16-bit signed integer, native endian, \(channels)声道")
-            } else if bitsPerChannel == 32 {
-                // 32位浮点 - 保持原有格式
-                audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false)
-                logger.info("🎵 使用32位浮点格式")
-            }
+
+        // 懒启动远程转写（目标格式：16k 单声道）
+        if isConnected && !transcriptionStarted {
+            let config: [String: Any] = [
+                "languageCode": "zh-CN",
+                "sampleRateHertz": 16000,
+                "mediaEncoding": "pcm",
+                "enableSpeakerDiarization": true,
+                "maxSpeakerLabels": 6,
+                "enableChannelIdentification": false,
+                "numberOfChannels": 1
+            ]
+            socket?.emit("start-transcription", config)
+            transcriptionStarted = true
+            logger.info("📤 发送转写配置: \(config)")
         }
-        
-        guard let format = audioFormat else {
-            logger.error("❌ 不支持的音频格式: formatID=\(formatID), bitsPerChannel=\(bitsPerChannel)")
-            return
+
+        // 转换并发送音频
+        if isConnected && transcriptionStarted,
+           let pcm16k = convertSampleBufferTo16kMonoPCM(sampleBuffer) {
+            let base64 = pcm16k.base64EncodedString()
+            socket?.emit("audio-data", ["audio": base64])
         }
-        
-        // 计算帧数量
-        let bytesPerSample = bitsPerChannel / 8
-        let frameCount = AVAudioFrameCount(data.count / (Int(bytesPerSample) * Int(channels)))
-        
-        guard frameCount > 0 else {
-            return
-        }
-        
-        guard let audioBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            return
-        }
-        
-        audioBuffer.frameLength = frameCount
-        
-        // 复制音频数据 - 16位格式使用交错数据（与WAV转换格式一致）
-        data.withUnsafeBytes { (rawBytes: UnsafeRawBufferPointer) in
-            if bitsPerChannel == 16 {
-                // 16位整数数据 - 使用交错格式（与成功的WAV转换一致）
-                guard let int16Pointer = rawBytes.bindMemory(to: Int16.self).baseAddress else {
-                    return
-                }
-                
-                // 对于交错格式，直接复制原始数据
-                if let audioDataPointer = audioBuffer.audioBufferList.pointee.mBuffers.mData {
-                    let sampleCount = Int(frameCount) * Int(channels)
-                    let audioInt16Pointer = audioDataPointer.bindMemory(to: Int16.self, capacity: sampleCount)
-                    audioInt16Pointer.initialize(from: int16Pointer, count: sampleCount)
-                    
-                    // 验证数据
-                    let firstSample = int16Pointer[0]
-                    let secondSample = channels > 1 ? int16Pointer[1] : firstSample
-                    logger.info("🔍 交错格式复制: 首样本=\(firstSample), 次样本=\(secondSample), 总样本数=\(sampleCount)")
-                }
-                
-            } else if bitsPerChannel == 32 {
-                // 32位浮点数据 - 从交错转为非交错
-                guard let floatPointer = rawBytes.bindMemory(to: Float.self).baseAddress,
-                      let channelData = audioBuffer.floatChannelData else {
-                    return
-                }
-                
-                if channels == 2 {
-                    // 立体声：分离交错数据
-                    let leftChannel = channelData[0]
-                    let rightChannel = channelData[1]
-                    
-                    for frame in 0..<Int(frameCount) {
-                        let interleavedIndex = frame * 2
-                        leftChannel[frame] = floatPointer[interleavedIndex]
-                        rightChannel[frame] = floatPointer[interleavedIndex + 1]
-                    }
-                } else {
-                    // 单声道：直接复制
-                    let channel = channelData[0]
-                    channel.initialize(from: floatPointer, count: Int(frameCount))
-                }
-            }
-        }
-        
-        // 注意：这里我们不直接保存audioBuffer，因为它是转换后的格式
-        // 我们需要保存原始的CMSampleBuffer，但这里只有转换后的AVAudioPCMBuffer
-        // 所以m4a保存需要在processAudioData中进行，使用原始数据
-        
-        // 保存转换后的音频数据用于验证
-        saveConvertedAudioBuffer(audioBuffer)  // 重新启用，测试新的交错格式
-        
-        // 发送到语音识别器
-        recognitionRequest.append(audioBuffer)
     }
     
     private func calculateAudioLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
@@ -865,6 +762,59 @@ public class RealtimeAudioStreamManager: NSObject, ObservableObject {
         let rms = sqrt(sum / Double(sampleCount))
         return rms
     }
+
+    // 将输入CMSampleBuffer转换为 16kHz 单声道 Int16 PCM 数据
+    private func convertSampleBufferTo16kMonoPCM(_ sampleBuffer: CMSampleBuffer) -> Data? {
+        guard let inputBuffer = createAudioPCMBufferFromSampleBuffer(sampleBuffer) else {
+            logger.warning("⚠️ 无法从SampleBuffer创建PCM缓冲区用于转换")
+            return nil
+        }
+        let inputFormat = inputBuffer.format
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16000.0,
+            channels: 1,
+            interleaved: false
+        ) else { return nil }
+
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            logger.error("❌ 创建音频转换器失败: \(inputFormat) -> \(String(describing: outputFormat))")
+            return nil
+        }
+
+        let inputFrameCount = inputBuffer.frameLength
+        let ratio = 16000.0 / inputFormat.sampleRate
+        let outFrameCapacity = AVAudioFrameCount(Double(inputFrameCount) * ratio) + 1
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outFrameCapacity) else {
+            return nil
+        }
+
+        var error: NSError?
+        var inputConsumed = false
+        let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+            if inputConsumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            inputConsumed = true
+            return inputBuffer
+        }
+        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+        if let error = error {
+            logger.error("❌ 音频转换错误: \(error.localizedDescription)")
+            return nil
+        }
+
+        guard let ch = outputBuffer.int16ChannelData?.pointee else { return nil }
+        let frames = Int(outputBuffer.frameLength)
+        var data = Data(count: frames * MemoryLayout<Int16>.size)
+        data.withUnsafeMutableBytes { dst in
+            guard let base = dst.bindMemory(to: Int16.self).baseAddress else { return }
+            base.assign(from: ch, count: frames)
+        }
+        return data
+    }
     
     private func createAudioPCMBufferFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
@@ -1019,6 +969,144 @@ extension RealtimeAudioStreamManager: SFSpeechRecognizerDelegate {
             if !available && isProcessing {
                 stopRecognition()
             }
+        }
+    }
+}
+
+// MARK: - Socket.IO 远程识别集成
+extension RealtimeAudioStreamManager {
+    private func setupSocket() {
+        guard let url = URL(string: serverURL) else { return }
+        socketManager = SocketManager(socketURL: url, config: [
+            .log(true),
+            .compress,
+            .forceWebsockets(true),
+            .forcePolling(false),
+            .reconnects(true),
+            .reconnectAttempts(3),
+            .reconnectWait(1),
+            .reconnectWaitMax(5)
+        ])
+        socket = socketManager?.socket(forNamespace: namespace)
+        setupSocketHandlers()
+    }
+    
+    private func setupSocketHandlers() {
+        socket?.on(clientEvent: .connect) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.isConnected = true
+                self.errorMessage = ""
+                self.logger.info("✅ 已连接转写服务")
+                // 若正在处理且尚未发送配置，立即发送16k/单声道配置，避免竞态
+                if self.isProcessing && !self.transcriptionStarted {
+                    let config: [String: Any] = [
+                        "languageCode": "zh-CN",
+                        "sampleRateHertz": 16000,
+                        "mediaEncoding": "pcm",
+                        "enableSpeakerDiarization": true,
+                        "maxSpeakerLabels": 6,
+                        "enableChannelIdentification": false,
+                        "numberOfChannels": 1
+                    ]
+                    self.socket?.emit("start-transcription", config)
+                    self.transcriptionStarted = true
+                    self.logger.info("📤 连接后立即发送转写配置: \(config)")
+                }
+            }
+        }
+        socket?.on(clientEvent: .disconnect) { [weak self] _, _ in
+            Task { @MainActor in
+                self?.isConnected = false
+                self?.transcriptionStarted = false
+            }
+        }
+        socket?.on("transcription-started") { [weak self] _, _ in
+            Task { @MainActor in
+                self?.logger.info("🎙️ 远程转写已开始")
+            }
+        }
+        socket?.on("transcription-error") { [weak self] data, _ in
+            guard let errorData = data.first as? [String: Any],
+                  let error = errorData["error"] as? String else { return }
+            Task { @MainActor in
+                self?.errorMessage = error
+                self?.logger.error("❌ 远程转写错误: \(error)")
+            }
+        }
+        socket?.on("transcription-result") { [weak self] data, _ in
+            // 详细打印服务端返回内容
+            if let first = data.first {
+                if let jsonData = try? JSONSerialization.data(withJSONObject: first, options: [.prettyPrinted]),
+                   let jsonStr = String(data: jsonData, encoding: .utf8) {
+                    self?.logger.info("📝 收到 transcription-result:\n\(jsonStr)")
+                } else {
+                    self?.logger.info("📝 收到 transcription-result: \(String(describing: first))")
+                }
+            } else {
+                self?.logger.info("📝 收到 transcription-result: []")
+            }
+            guard let self = self,
+                  let payload = data.first as? [String: Any],
+                  let result = payload["result"] as? [String: Any],
+                  let transcript = result["transcript"] as? String else { return }
+            let isPartial = result["isPartial"] as? Bool ?? false
+            let speaker = (result["speaker"] as? String) ?? "?"
+            Task { @MainActor in
+                self.handleDiarizedResult(speaker: speaker, transcript: transcript, isPartial: isPartial)
+            }
+        }
+    }
+    
+    private func startSocketRecognition() {
+        guard !isProcessing else { return }
+        if textPreservationRequested { shouldPreserveText = true }
+        
+        // 重置文本与会话状态
+        lastSpeaker = nil
+        diarizedLines.removeAll()
+        hasLoggedFormat = false
+        transcriptionStarted = false
+        
+        // 音频录制保持与原实现一致
+        do { try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) } catch {}
+        m4aStartTime = nil
+        startM4ARecording()
+        startConvertedAudioRecording()
+        
+        isProcessing = true
+        socket?.connect()
+    }
+    
+    private func stopSocketRecognition() {
+        guard isProcessing else { return }
+        isProcessing = false
+        socket?.emit("stop-transcription")
+        socket?.disconnect()
+        stopConvertedAudioRecording()
+        stopM4ARecording()
+    }
+    
+    private func handleDiarizedResult(speaker: String, transcript: String, isPartial: Bool) {
+        guard !transcript.isEmpty else { return }
+        if let last = lastSpeaker, last == speaker, !diarizedLines.isEmpty {
+            diarizedLines[diarizedLines.count - 1].text = transcript
+            diarizedLines[diarizedLines.count - 1].isFinal = !isPartial
+        } else {
+            diarizedLines.append((speaker: speaker, text: transcript, isFinal: !isPartial))
+            lastSpeaker = speaker
+        }
+        updateRecognizedTextFromLines()
+    }
+    
+    private func updateRecognizedTextFromLines() {
+        let lines = diarizedLines.map { line in
+            "说话人 \(line.speaker)：\(line.text)"
+        }
+        if shouldPreserveText, !previousText.isEmpty {
+            recognizedText = previousText + "\n" + lines.joined(separator: "\n")
+        } else {
+            recognizedText = lines.joined(separator: "\n")
         }
     }
 }
